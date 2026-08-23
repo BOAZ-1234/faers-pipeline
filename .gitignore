@@ -1,0 +1,29 @@
+# 착수 전 feasibility 실험 전부 (스크립트 · 산출물 · 원본데이터 · 개인 기획문서)
+_probe/
+
+# 가상환경 / 캐시 / IDE
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.vscode/
+.idea/
+.DS_Store
+.claude/settings.local.json
+
+# 비밀값
+.env
+.env.*
+*.pem
+*.key
+
+# 데이터 · 산출물
+data/
+out/
+*.parquet
+*.csv
+*.db
+*.sqlite3
+
+# 새 폴더 구조로 정리 중 — 기존 폴더 전부 임시 ignore
+samples/
