@@ -63,7 +63,8 @@ WORD_ORDER = [
 def apply_spelling(term: str) -> str:
     t = term.lower()
     for us, uk in SPELLING:
-        t = t.replace(us, uk)
+        # \b(단어 경계)로 치환 — 부분 문자열 오염 방지 (e.g. oedema 안의 edema)
+        t = re.sub(r'\b' + re.escape(us) + r'\b', uk, t)
     return t
 
 
