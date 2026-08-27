@@ -7,6 +7,7 @@ C세부1 — 식약처 의약품 제품 허가정보에서 한글 제품명↔�
 """
 import csv
 import json
+import re
 import time
 import urllib.request
 import urllib.parse
@@ -31,6 +32,15 @@ def load_service_key() -> str:
 
 
 SERVICE_KEY = load_service_key()
+
+_WS = re.compile(r"\s+")
+
+
+def clean_name(s: str) -> str:
+    """원본 ITEM_NAME에 개행문자가 섞여 들어오는 경우가 있다
+    (예: "신일브롬헥신염산염정\n(수출명 : BIVOTUME, BIVO)"). 개행·연속 공백을
+    공백 하나로 합쳐 FAERS 자유기재 텍스트와 매칭할 때 방해되지 않게 한다."""
+    return _WS.sub(" ", s).strip()
 
 
 def fetch_page(page_no: int, retries: int = 3) -> tuple[list[dict], int]:
@@ -62,6 +72,7 @@ def extract_pairs(item: dict) -> list[dict]:
     ingr_raw = item.get("ITEM_INGR_NAME")
     if not name or not ingr_raw:
         return []
+    name = clean_name(name)
 
     parts = [p.strip() for p in ingr_raw.split("/") if p.strip()]
     expected_cnt = item.get("ITEM_INGR_CNT")
