@@ -38,7 +38,7 @@ TARGET_MAPPING = {
     "DRUG": f"my_catalog.{NAMESPACE}.faers_drug",
     "REAC": f"my_catalog.{NAMESPACE}.faers_reac"
 }
-CHUNK_SIZE = 50000
+CHUNK_SIZE = 30000
 
 # 4. Iceberg 적재 함수 (다형성 지원)
 def write_to_iceberg(chunk_data, header, table_name, file_type):
@@ -67,7 +67,7 @@ def write_to_iceberg(chunk_data, header, table_name, file_type):
             df.write.format("iceberg").mode("append").saveAsTable(table_name)
 
 # 5. 모든 ZIP 파일 연속 파싱 릴레이 작전!
-zip_files = sorted(glob.glob("data/*.zip"))
+zip_files = sorted(glob.glob("data/*.zip"), reverse=True)
 print(f"\n📦 총 {len(zip_files)}개의 ZIP 파일을 발견했습니다. 파이프라인 가동을 시작합니다!\n" + "="*60)
 
 for zip_path in zip_files:
@@ -92,7 +92,7 @@ for zip_path in zip_files:
                     total_count = 0
                     
                     for line in f:
-                        data = line.decode('utf-8').strip().split('$')
+                        data = line.decode('utf-8', errors='replace').strip().split('$')
                         # 컬럼 개수가 정상인 데이터만 캡처
                         if len(data) == len(header):
                             chunk.append(data)
