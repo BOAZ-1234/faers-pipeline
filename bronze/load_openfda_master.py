@@ -29,8 +29,8 @@ spark = SparkSession.builder \
 # 브론즈 네임스페이스 확인
 spark.sql("CREATE NAMESPACE IF NOT EXISTS my_catalog.stage_a_raw")
 
-# 2. [Label 데이터] 파싱 및 적재 (양방향 완벽 대조 동기화 모드)
-print("\n🔍 OpenFDA Drug Label 데이터 파싱 중 (양방향 완벽 동기화 모드)...")
+# 2. [Label 데이터] 파싱 및 적재 (수동 스키마 완벽 제어 모드)
+print("\n🔍 OpenFDA Drug Label 데이터 파싱 중 (수동 스키마 제어 모드)...")
 
 label_files = sorted(glob.glob("data/label/*.json"))
 print(f"총 {len(label_files)}개의 파일을 발견했습니다. 순차 적재를 시작합니다!")
@@ -41,28 +41,45 @@ for i, file_path in enumerate(label_files):
     df = spark.read.option("multiline", "true").json(file_path)
     exploded_df = df.select(explode("results").alias("res")).select("res.*")
     
+    table_name = "my_catalog.stage_a_raw.openfda_label"
+    
     if i == 0:
-        write_mode = "overwrite"
+        # 첫 번째 파일로 기준 테이블을 생성합니다.
+        exploded_df.writeTo(table_name).createOrReplace()
     else:
-        write_mode = "append"
+        target_table_df = spark.table(table_name)
         
-        # 🛡️ [양방향 스키마 대조 및 싱크 맞추기]
-        target_table_df = spark.table("my_catalog.stage_a_raw.openfda_label")
+        # 🛡️ [수동 방어 1단계: 새로운 컬럼 추가] 
+        # 파일에는 있는데 S3 테이블에 없는 '새로운 기둥'을 찾아 직접 ALTER TABLE을 날립니다.
+        new_cols = []
+        for col_name in exploded_df.columns:
+            if col_name not in target_table_df.columns:
+                col_type = exploded_df.schema[col_name].dataType.simpleString()
+                # 백틱(`)을 사용해 띄어쓰기 등 특수문자 에러 방지
+                new_cols.append(f"`{col_name}` {col_type}")
         
-        # 1단계: S3 테이블에는 있는데 현재 파일에 없으면 -> 현재 파일에 Null 채우기
-        for target_col in target_table_df.columns:
+        if new_cols:
+            print(f"    🌟 [스키마 진화] {len(new_cols)}개의 새로운 컬럼 감지! 테이블을 확장합니다.")
+            alter_query = f"ALTER TABLE {table_name} ADD COLUMNS ({', '.join(new_cols)})"
+            spark.sql(alter_query)
+            
+        # 🛡️ [수동 방어 2단계: 최신 스키마 갱신]
+        # 방금 ALTER TABLE로 기둥을 추가했으니, 테이블 설계도를 다시 읽어옵니다.
+        updated_table_df = spark.table(table_name)
+        
+        # 🛡️ [수동 방어 3단계: 누락된 컬럼 처리] 
+        # 테이블에는 있는데 파일에 없는 기둥들을 찾아 강제로 Null을 채워 넣습니다.
+        for target_col in updated_table_df.columns:
             if target_col not in exploded_df.columns:
-                target_type = target_table_df.schema[target_col].dataType
+                target_type = updated_table_df.schema[target_col].dataType
                 exploded_df = exploded_df.withColumn(target_col, lit(None).cast(target_type))
                 
-        # 2단계: 현재 파일에는 있는데 S3 테이블(기존 데이터)에 없으면 -> 과거 테이블 호환을 위해 
-        # mergeSchema 옵션이 새로운 기둥을 유연하게 확장해 줍니다.
-    
-    exploded_df.write \
-        .format("iceberg") \
-        .option("mergeSchema", "true") \
-        .mode(write_mode) \
-        .saveAsTable("my_catalog.stage_a_raw.openfda_label")
+        # 🛡️ [수동 방어 4단계: 순서 맞추기] (🔥 핵심)
+        # 컬럼 개수가 같아도 순서가 다르면 뻗기 때문에, 테이블과 똑같은 순서로 재배열합니다.
+        exploded_df = exploded_df.select(*updated_table_df.columns)
+        
+        # 🚀 [최종 적재] 두 데이터의 구조가 100% 동일해졌으므로 무조건 성공합니다!
+        exploded_df.writeTo(table_name).append()
 
 print("✅ Label 데이터 14개 분할 적재 완료! [my_catalog.stage_a_raw.openfda_label]")
 
@@ -73,10 +90,7 @@ drugsfda_raw_df = spark.read.option("multiline", "true").json("data/drugsfda/*.j
 drugsfda_df = drugsfda_raw_df.select(explode("results").alias("res")).select("res.*")
 
 print("💾 Drugs@FDA 데이터를 S3에 적재합니다...")
-drugsfda_df.write \
-    .format("iceberg") \
-    .mode("overwrite") \
-    .saveAsTable("my_catalog.stage_a_raw.openfda_drugsfda")
+drugsfda_df.writeTo("my_catalog.stage_a_raw.openfda_drugsfda").createOrReplace()
 print("✅ Drugs@FDA 데이터 적재 완료! [my_catalog.stage_a_raw.openfda_drugsfda]")
 
 print("\n🎉 모든 마스터 데이터가 성공적으로 S3 레이크에 둥지를 틀었습니다!")

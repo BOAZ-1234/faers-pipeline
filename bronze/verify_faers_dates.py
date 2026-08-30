@@ -1,3 +1,5 @@
+#S3에 적재된 FAERS 데모 테이블(stage_a_raw.faers_demo)의 상태를 빠르게 점검하는 검증용 스크립트입니다. 무거운 전체 데이터 건수 카운트를 생략하여 메모리 부족 현상을 방지하고, 보고일자(fda_dt)를 기준으로 가장 최근 데이터 10건과 가장 오래된 데이터 10건만 샘플링하여 데이터가 제대로 들어갔는지 신속하게 확인합니다.
+
 import os
 from dotenv import load_dotenv
 from pyspark.sql import SparkSession

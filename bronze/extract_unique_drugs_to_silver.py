@@ -1,3 +1,5 @@
+# 브론즈 계층(stage_a_raw.faers_drug)의 원본 약물 데이터에서 중복을 제거한 고유 약물명(Unique Drugs)을 추출하고,
+# 이를 실버 계층(stage_b_silver.dict_unique_drugs) 사전에 Iceberg 포맷으로 영구 적재하는 핵심 파이프라인 스크립트입니다.
 import os
 from dotenv import load_dotenv
 from pyspark.sql import SparkSession
