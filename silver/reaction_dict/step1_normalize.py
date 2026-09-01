@@ -96,10 +96,14 @@ def query_openfda(term: str) -> tuple[str, int]:
     try:
         with urllib.request.urlopen(url, timeout=10) as r:
             data = json.loads(r.read())
-        count = data["meta"]["results"]["total"]
-        return term, count
-    except Exception:
-        return "", 0
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return "", 0  # 결과 없음 — 정상
+        raise RuntimeError(f"openFDA HTTP {e.code} for term={term!r}") from e
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise RuntimeError(f"openFDA 연결 실패 for term={term!r}: {e}") from e
+    count = data["meta"]["results"]["total"]
+    return term, count
 
 
 def main():

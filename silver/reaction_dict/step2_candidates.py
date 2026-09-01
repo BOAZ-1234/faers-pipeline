@@ -42,8 +42,12 @@ def search_candidates(word: str) -> list[dict]:
     try:
         with urllib.request.urlopen(url, timeout=15) as r:
             data = json.loads(r.read())
-    except Exception:
-        return []
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return []  # 결과 없음 — 정상
+        raise RuntimeError(f"openFDA HTTP {e.code} for word={word!r}") from e
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise RuntimeError(f"openFDA 연결 실패 for word={word!r}: {e}") from e
     out = []
     for item in data.get("results", []):
         if word.upper() in item["term"]:
