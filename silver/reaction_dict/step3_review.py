@@ -169,9 +169,6 @@ def main():
 
     n_final = write_final(results)
     done = sum(1 for r in results if r["status"] in ("ok", "edited", "none"))
-    pending = sum(1 for r in all_signals
-                  if reviewed_map.get(r["signal"], {}).get("status", "skipped") not in ("ok", "edited", "none")
-                  and r["signal"] not in {r["signal"] for r in results if r["status"] in ("ok", "edited", "none")})
 
     print(f"\n확정: {done}개 / 최종 사전: {n_final}개 → {FINAL_PATH.relative_to(HERE.parent.parent)}")
     remaining = total - done
