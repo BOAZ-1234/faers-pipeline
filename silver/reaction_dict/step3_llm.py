@@ -57,14 +57,21 @@ Which PT(s) from the candidate list map to this signal? Follow the rules."""
     )
     raw = msg.content[0].text.strip()
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except json.JSONDecodeError:
-        # 혹시 마크다운 코드블록 감싸진 경우
         import re
         m = re.search(r"\{.*\}", raw, re.DOTALL)
         if m:
-            return json.loads(m.group())
-        return {"pts": [], "note": f"parse error: {raw[:120]}"}
+            parsed = json.loads(m.group())
+        else:
+            return {"pts": [], "note": f"parse error: {raw[:120]}"}
+
+    if not isinstance(parsed, dict):
+        return {"pts": [], "note": f"unexpected response shape: {raw[:120]}"}
+    pts = parsed.get("pts", [])
+    if isinstance(pts, str):
+        pts = [] if pts.upper() == "NONE" else [pts]
+    return {"pts": [p for p in pts if p and p.upper() != "NONE"], "note": parsed.get("note", "")}
 
 
 def pts_to_set_id(pts: list[str]) -> str:
