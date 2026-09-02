@@ -27,3 +27,8 @@ out/
 
 # 새 폴더 구조로 정리 중 — 기존 폴더 전부 임시 ignore
 samples/
+
+#브론즈 데이터 폴더
+bronze/data
+
+
