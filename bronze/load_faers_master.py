@@ -5,7 +5,7 @@ import glob
 import zipfile
 from dotenv import load_dotenv
 from pyspark.sql import SparkSession
-from pyspark.sql.types import StructType, StructField, StringType
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType
 
 # 1. AWS 열쇠 장착
 load_dotenv()
@@ -40,6 +40,17 @@ TARGET_MAPPING = {
     "DRUG": f"my_catalog.{NAMESPACE}.faers_drug",
     "REAC": f"my_catalog.{NAMESPACE}.faers_reac"
 }
+# 설계 문서 4-1: 컬럼 개수가 안 맞는 실패 레코드는 버리지 않고 이 테이블에 격리한다.
+REJECTS_TABLE = f"my_catalog.{NAMESPACE}.faers_load_rejects"
+REJECTS_SCHEMA = StructType([
+    StructField("source_zip", StringType(), True),
+    StructField("source_txt", StringType(), True),
+    StructField("file_type", StringType(), True),
+    StructField("line_no", IntegerType(), True),
+    StructField("expected_cols", IntegerType(), True),
+    StructField("actual_cols", IntegerType(), True),
+    StructField("raw_line", StringType(), True),
+])
 CHUNK_SIZE = 30000
 
 # 4. Iceberg 적재 함수 (다형성 지원)
@@ -68,6 +79,17 @@ def write_to_iceberg(chunk_data, header, table_name, file_type):
         else:
             df.write.format("iceberg").mode("append").saveAsTable(table_name)
 
+# 4-1. 컬럼 개수 불일치로 실패한 레코드를 격리 테이블에 적재 (원본은 절대 버리지 않는다)
+def write_rejects_to_iceberg(reject_chunk):
+    if not reject_chunk:
+        return
+
+    df = spark.createDataFrame(reject_chunk, REJECTS_SCHEMA)
+    if not spark.catalog.tableExists(REJECTS_TABLE):
+        df.write.format("iceberg").saveAsTable(REJECTS_TABLE)
+    else:
+        df.write.format("iceberg").mode("append").saveAsTable(REJECTS_TABLE)
+
 # 5. 모든 ZIP 파일 연속 파싱 릴레이 작전!
 zip_files = sorted(glob.glob("data/*.zip"), reverse=True)
 print(f"\n📦 총 {len(zip_files)}개의 ZIP 파일을 발견했습니다. 파이프라인 가동을 시작합니다!\n" + "="*60)
@@ -91,26 +113,45 @@ for zip_path in zip_files:
                     # 첫 줄 헤더 파싱
                     header = f.readline().decode('utf-8').strip().split('$')
                     chunk = []
+                    reject_chunk = []
                     total_count = 0
-                    
-                    for line in f:
-                        data = line.decode('utf-8', errors='replace').strip().split('$')
-                        # 컬럼 개수가 정상인 데이터만 캡처
+                    total_rejected = 0
+                    line_no = 1  # 헤더가 1번째 줄
+
+                    for raw_line in f:
+                        line_no += 1
+                        decoded_line = raw_line.decode('utf-8', errors='replace')
+                        data = decoded_line.strip().split('$')
+
+                        # 컬럼 개수가 정상인 데이터만 정상 청크로 캡처
                         if len(data) == len(header):
                             chunk.append(data)
-                        
+                        else:
+                            # 4-1: 컬럼 개수 불일치 레코드는 버리지 않고 격리 테이블로
+                            reject_chunk.append([
+                                file_name, target, file_type, line_no,
+                                len(header), len(data), decoded_line.strip(),
+                            ])
+
                         # 청크 사이즈 도달 시 발사
                         if len(chunk) >= CHUNK_SIZE:
                             total_count += len(chunk)
                             write_to_iceberg(chunk, header, table_name, file_type)
                             chunk = []
-                    
+                        if len(reject_chunk) >= CHUNK_SIZE:
+                            total_rejected += len(reject_chunk)
+                            write_rejects_to_iceberg(reject_chunk)
+                            reject_chunk = []
+
                     # 마지막 남은 자투리 발사
                     if chunk:
                         total_count += len(chunk)
                         write_to_iceberg(chunk, header, table_name, file_type)
-                        
-                print(f"  ✅ [{file_type}] 총 {total_count}건 처리 완료!")
+                    if reject_chunk:
+                        total_rejected += len(reject_chunk)
+                        write_rejects_to_iceberg(reject_chunk)
+
+                print(f"  ✅ [{file_type}] 총 {total_count}건 처리 완료! (컬럼 불일치로 격리된 레코드 {total_rejected}건 -> {REJECTS_TABLE})")
             else:
                 print(f"  ⚠️ [{file_name}] 안에 {file_type} 파일이 없어 건너뜁니다.")
 
