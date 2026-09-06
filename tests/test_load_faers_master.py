@@ -66,7 +66,7 @@ def test_reject_records_land_in_quarantine_table_via_pyspark(local_iceberg_spark
     assert len(reject_chunk) == 2
 
     good_table = "my_catalog.test_bronze.faers_drug_test"
-    mod.write_to_iceberg(chunk, header, good_table, "DRUG")
+    mod.write_to_iceberg(chunk, header, good_table, "DRUG", "TEST25Q1.zip")
     mod.write_rejects_to_iceberg(reject_chunk)
 
     written = local_iceberg_spark.table(good_table).orderBy("primaryid").collect()
