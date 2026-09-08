@@ -32,6 +32,9 @@ DOSAGE_FORM_WORDS = {
 _UNIT_ATTACHED = re.compile(r"^\d+(\.\d+)?(MG|MCG|G|KG|ML|L|MEQ|IU|UNIT|UNITS|%)$", re.I)
 _PURE_NUM = re.compile(r"^\d+(\.\d+)?$")
 _TRAILING_HYPHEN_NUM = re.compile(r"^(.*\S)-\d+(\.\d+)?$")
+# NDC 코드 등 "/00002701/" 같은 숫자 코드 토큰 — 약물명이 아니라 부가 식별자라 뗀다
+_CODE_TOKEN = re.compile(r"^/\d+/$")
+_BRACKET = re.compile(r"\[([^\[\]]+)\]")
 
 
 def normalize_query(name: str) -> str:
@@ -51,7 +54,7 @@ def normalize_query(name: str) -> str:
         if not tokens:
             break
         last = tokens[-1].rstrip(",")
-        if last in DOSAGE_FORM_WORDS or _UNIT_ATTACHED.match(last) or _PURE_NUM.match(last):
+        if last in DOSAGE_FORM_WORDS or _UNIT_ATTACHED.match(last) or _PURE_NUM.match(last) or _CODE_TOKEN.match(last):
             s = " ".join(tokens[:-1])
             changed = True
             continue
@@ -60,3 +63,20 @@ def normalize_query(name: str) -> str:
             s = " ".join(tokens[:-1])
             changed = True
     return s.strip()
+
+
+def extract_bracket_alt(name: str) -> str | None:
+    """"ALBUTEROL [SALBUTAMOL]" → "SALBUTAMOL". 원본이 괄호 안에 동의어를
+    직접 적어준 경우라, 괄호 밖이 사전에 없어도 괄호 안이 바로 성분명인 경우가 있다."""
+    m = _BRACKET.search(name)
+    return m.group(1).strip() if m else None
+
+
+def split_backslash_parts(name: str) -> list[str] | None:
+    """"ACETAMINOPHEN\\OXYCODONE HYDROCHLORIDE" → ["ACETAMINOPHEN", "OXYCODONE HYDROCHLORIDE"].
+    FAERS 자유기재에서 "\\"가 복합제 성분 구분자로 쓰이는 경우가 있다(§5-1 ingredient_set의
+    "|"와 같은 역할, 원본 표기만 다름)."""
+    if "\\" not in name:
+        return None
+    parts = [p.strip() for p in name.split("\\") if p.strip()]
+    return parts if len(parts) > 1 else None
