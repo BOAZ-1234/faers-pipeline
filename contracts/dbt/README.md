@@ -85,11 +85,7 @@ PYTHONUTF8=1 dbt build --project-dir contracts/dbt --profiles-dir contracts/dbt
 ```
 
 `dbt build` = seed 적재 → 계약모델 생성(타입·제약 강제) → 테스트 실행. 전부 통과하면 `PASS=14`.
-
-> **CI 주의 — 검사 시점이 둘이다.** PR CI(`.github/workflows/contract.yml`, 지금은 보류)는
-> **seeds 픽스처 + 계약 코드**의 회귀만 본다. **실제 사전 데이터는 repo 밖**(gitignore/클라우드)이라
-> PR CI에 안 잡힌다. 실데이터 형식 검증은 사전이 (재)생성될 때 `source`를 실데이터에 연결해
-> `dbt build`를 돌리는 **별도 잡**에서 하며, §5-1 "기준선 미달이면 파이프라인 정지"가 무는 지점은 거기다.
+지금은 로컬에서 이 명령으로 검증한다(CI는 아래 '다음 단계' 참고).
 
 ## 계약이 실제로 막는지 확인 (깨보기)
 
@@ -143,6 +139,8 @@ seed에서 한 값을 일부러 어긋내고 다시 `dbt build`:
 - [ ] 상류 `silver/reaction_dict/` 컬럼명(`signal`/`pt_set`)을 계획서 키로 맞출지 함하경과 확정
       (지금은 이 계약의 staging에서 alias로 통일 중)
 - [ ] 성분 사전의 `resolution_status` / 부작용 사전의 `status` 값 집합 확정(accepted_values) 성분 사전: 지금은 확정 / 보류/미해결/수기 4개인데 확정인지 (일단 schema.yml에 현재 기준으로 values 등록해놓음), 부작용 사전: 지금은 상태값 자체가 코드마다 다름 -> ok, None 등.. 이거 확정 필요
-- [ ] Resolution·reaction_dict를 status로 집계 → **조인율 품질테이블**(§5-1 후반, 기준선 미달 시 파이프라인 정지)
-      — 형식 계약과 별개 검사이며, 실데이터에서만 의미 있어 source 교체와 함께 붙인다
+- [ ] **실데이터 `source` 연결 후 함께 추가** (지금은 seeds 픽스처라 둘 다 의미 없어 보류):
+      - **조인율 품질테이블** — status로 집계해 조인율 적재, 기준선 미달 시 파이프라인 정지(§5-1 후반)
+      - **CI** — 사전 (재)생성 시 실데이터에 `dbt build`를 돌려 형식 계약 검사(§6).
+        (PR 코드 회귀만 볼 거면 픽스처로 도는 가벼운 워크플로를 따로 둘 수도 있음)
 - [ ] (별개·나중) D단계 dbt 마트 — §5-2 국내조인, `serving/` 아래
