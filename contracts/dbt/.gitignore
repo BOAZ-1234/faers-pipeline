@@ -1,0 +1,8 @@
+target/
+dbt_packages/
+logs/
+.user.yml
+dev.duckdb
+dev.duckdb.wal
+# 루트 .gitignore가 *.csv 를 무시하므로 seed는 예외 처리(커밋 대상)
+!seeds/*.csv

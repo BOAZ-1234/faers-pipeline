@@ -1,0 +1,10 @@
+# 로컬 duckdb를 웨어하우스로 사용 — 인프라 0으로 계약을 강제·검증한다. dev.duckdb 파일 하나가 곧 DB다.
+# 계약 강제가 목적이라 seed(수 행 픽스처)만 처리하면 되므로 duckdb로 충분하다.
+# 실행 시 --profiles-dir . 로 이 파일을 가리킨다.
+faers_contract:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: dev.duckdb
+      threads: 4

@@ -1,0 +1,115 @@
+version: 2
+
+# ── 조인키 계약(contract) ────────────────────────────────────────────────
+# config.contract.enforced=true → 모델을 만들 때 아래 컬럼 이름·타입·제약을
+# CREATE TABLE 시점에 강제한다. 어긋난 산출이 나오면 `dbt build`가 실패하고
+# 테이블을 내보내지 않는다 → 형식만 어긋난 키가 B·D 조인으로 새는 걸 막는다.
+# 기획서 §5-1 C→B·D 조인키: 성분 쪽 ingredient_set/unii, 부작용 쪽 pt_set_id.
+# 두 사전(성분·부작용) 모두 D단계에서 조인·대조에 쓰이므로 여기서 함께 계약한다.
+
+models:
+  - name: stg_resolution
+    description: "C단계 최종 확정본 — 약이름 1개당 1행. 성분 조인키(ingredient_set/unii) 원천."
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: entity_id
+        description: "약이름 식별 ID (candidate와 잇는 키)"
+        data_type: varchar
+        constraints:
+          - type: not_null
+          - type: unique          # 약이름당 정확히 1행
+      - name: raw_drug_name
+        data_type: varchar
+        constraints:
+          - type: not_null
+      - name: resolution_status
+        description: "최종 판정 상태"
+        data_type: varchar
+        constraints:
+          - type: not_null
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['확정', '보류', '미해결', '수기']   # 4개 상태만 허용
+      - name: resolved_ingredient_set
+        description: "확정 성분(묶음). 소문자·알파벳정렬·| 연결 — 조인키."
+        # 무조건 not_null 은 미해결 행(성분 없음)까지 막으므로 부적절.
+        # '확정/수기 이면 성분 필수'는 assert_resolved_has_ingredient 테스트로 강제.
+        data_type: varchar
+      - name: unii
+        description: "확정 성분 물질코드(10자) 또는 빈값(복합제 묶음)"
+        data_type: varchar
+      - name: resolved_stage
+        data_type: integer
+      - name: resolved_method
+        data_type: varchar
+      - name: confidence
+        data_type: double
+      - name: pipeline_version
+        description: "재현용 — 왜 답이 달라졌나 추적"
+        data_type: varchar
+      - name: dictionary_version
+        data_type: varchar
+
+  - name: stg_candidate
+    description: "후보 이력 — 약이름당 여러 행. 왜 이 성분으로 확정됐는지 추적."
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: entity_id
+        data_type: varchar
+        constraints:
+          - type: not_null
+        data_tests:
+          - relationships:                     # 다리 무결성: 모든 후보의 entity_id는
+              arguments:
+                to: ref('stg_resolution')      # resolution에 존재해야 한다
+                field: entity_id
+      - name: raw_drug_name
+        data_type: varchar
+      - name: normalized_drug_name
+        data_type: varchar
+      - name: stage
+        data_type: integer
+      - name: candidate_rank
+        data_type: integer
+      - name: candidate_alias
+        data_type: varchar
+      - name: candidate_ingredient_set
+        data_type: varchar
+      - name: unii
+        data_type: varchar
+      - name: lexical_score
+        data_type: double
+      - name: semantic_score
+        data_type: double
+      - name: source
+        data_type: varchar
+
+  - name: stg_reaction_dict
+    description: "C단계 부작용 사전 — 정답지 signal 1개당 1행. D단계 채점에서 '사람이 쓴 정답지 부작용문'을 표준 묶음(pt_set_id)으로 맞추는 조인키 원천. 상류 reaction_dict의 signal/pt_set 를 계획서 키 signal_term/pt_set_id 로 통일."
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: signal_term
+        description: "정답지 부작용 표기(조인 키). 상류 컬럼 signal → 계획서 키 signal_term."
+        data_type: varchar
+        constraints:
+          - type: not_null
+          - type: unique          # signal 표기당 정확히 1행
+      - name: pt_set_id
+        description: "표준 용어 묶음. 소문자·정렬·| 연결, 하나짜리도 묶음. 상류 pt_set → 계획서 키 pt_set_id."
+        # 미매칭 signal 은 pt_set_id 가 빈값일 수 있어 not_null 은 걸지 않는다.
+        # 형식(소문자·정렬)은 assert_pt_set_id_format / _sorted 로 강제.
+        data_type: varchar
+      - name: method
+        data_type: varchar
+      - name: status
+        description: "판정 상태(값 집합은 함하경과 확정 예정 — 지금은 accepted_values 미적용)"
+        data_type: varchar
+        constraints:
+          - type: not_null

@@ -1,0 +1,20 @@
+name: 'faers_contract'
+version: '0.1.0'
+config-version: 2
+
+profile: 'faers_contract'
+
+model-paths: ['models']
+seed-paths: ['seeds']
+test-paths: ['tests']
+target-path: 'target'
+clean-targets: ['target', 'dbt_packages']
+
+# 이건 서빙 마트가 아니라 C→B·D 경계의 '조인키 계약 강제'다(기획서 §5-1).
+# C단계 산출(성분 사전)의 조인키를 staging 모델로 받아 table로 물질화해,
+# contract를 실제 CREATE TABLE 시점에 강제한다 → 형식이 어긋난 키는 빌드 실패.
+# D단계 dbt 마트(§5-2 국내조인)는 별개이며 serving/ 아래에 나중에 만든다.
+models:
+  faers_contract:
+    staging:
+      +materialized: table

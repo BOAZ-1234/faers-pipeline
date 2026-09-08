@@ -1,0 +1,7 @@
+entity_id,raw_drug_name,resolution_status,resolved_ingredient_set,unii,resolved_stage,resolved_method,confidence,pipeline_version,dictionary_version
+e001,DURAGESIC-100,확정,fentanyl,UF599785JZ,1,dictionary,1.0,v0.1,dict-2026Q1
+e002,KLACID,확정,clarithromycin,H1250JIK0A,1,dictionary,1.0,v0.1,dict-2026Q1
+e003,SINEMET,확정,carbidopa|levodopa,,1,dictionary,0.95,v0.1,dict-2026Q1
+e004,ZYRTEC-D,확정,cetirizine|pseudoephedrine,,2,fuzzy,0.82,v0.1,dict-2026Q1
+e005,XYZQ MISSPELL,미해결,,,3,,0.0,v0.1,dict-2026Q1
+e006,TYLENOL PM,보류,acetaminophen|diphenhydramine,,3,llm,0.6,v0.1,dict-2026Q1

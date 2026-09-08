@@ -24,6 +24,8 @@ out/
 *.csv
 *.db
 *.sqlite3
+*.duckdb
+*.duckdb.wal
 
 # 새 폴더 구조로 정리 중 — 기존 폴더 전부 임시 ignore
 samples/

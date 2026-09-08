@@ -1,0 +1,8 @@
+entity_id,raw_drug_name,normalized_drug_name,stage,candidate_rank,candidate_alias,candidate_ingredient_set,unii,lexical_score,semantic_score,source
+e001,DURAGESIC-100,DURAGESIC,1,1,DURAGESIC,fentanyl,UF599785JZ,1.0,,rxnorm
+e002,KLACID,KLACID,1,1,KLACID,clarithromycin,H1250JIK0A,1.0,,openfda
+e003,SINEMET,SINEMET,1,1,SINEMET,carbidopa|levodopa,,1.0,,rxnorm
+e004,ZYRTEC-D,ZYRTEC D,2,1,ZYRTEC,cetirizine|pseudoephedrine,,0.82,,rxnorm
+e004,ZYRTEC-D,ZYRTEC D,2,2,ZYRTEC ALLERGY,cetirizine,,0.71,,openfda
+e005,XYZQ MISSPELL,XYZQ,3,1,,,,,0.41,embedding
+e006,TYLENOL PM,TYLENOL PM,3,1,TYLENOL PM,acetaminophen|diphenhydramine,,0.55,0.68,llm
