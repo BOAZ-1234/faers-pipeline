@@ -1,5 +1,5 @@
 """
-C세부1 — sources/output의 5개 CSV(openfda_label·openfda_ndc·rxnorm·mfds·diana)를
+C세부1 — sources/output의 4개 CSV(openfda_label·openfda_ndc·rxnorm·mfds)를
 표기 규칙 하나로 통일해 병합 → drug_ingredient_map
 
 ingredient_norm 정규화 규칙은 project-plan.html §5-1에 "대문자 · 공백 단일화 ·
@@ -17,9 +17,10 @@ ingredient_set(§5-1 표준, 정렬·소문자·파이프)은 복합제 성분�
 모두 남긴다 — 아직 candidate/resolution 2테이블 스키마로 전환 전이라(안건 A 미확정)
 잠정적으로 취한 방식.
 
-DiAna(diana.csv)는 FAERS 원본 문자열을 직접 키로 쓰는 소스라 UNII가 없고, 대소문자도
-소문자다. match.py에서 이 소스 유래 항목은 normalize_query() 없이 원본 그대로
-대조해야 회수 효과가 난다(원본이 이미 FAERS 실제 표기라 재정규화하면 어긋남).
+DiAna(sources/diana.py)는 캐스케이드 계약 회의에서 구두로 "이름 통일 정답지"로
+쓰기로 합의됐다 — §7의 prod_ai 정답지와 같은 역할(사전과 분리된 held-out 평가셋).
+그래서 여기 SOURCE_FILES에는 포함하지 않는다 — 사전에 넣으면 정답지 겸 사전이 되어
+평가가 순환 논리가 된다(한 번 잘못 넣었다가 되돌린 적 있음, 2026-09-08).
 """
 import csv
 import re
@@ -43,7 +44,7 @@ SOURCE_FILES = {
     "openfda_ndc": "openfda_ndc.csv",
     "rxnorm": "rxnorm.csv",
     "mfds": "mfds.csv",
-    "diana": "diana.csv",
+    # "diana": "diana.csv",  # 넣지 않음 — 정답지로 씀(위 docstring 참고)
 }
 
 # 초안 — 기획서에 목록이 없어 일반적인 제약 명명 규칙으로 채움. 검토 필요.
