@@ -45,14 +45,14 @@ def main():
     rows = fetch_drugname_counts()
     print(f"고유 약물명: {len(rows):,}개", flush=True)
 
-    products, ingredients = load_dictionary()
+    products, ingredients, known_combos = load_dictionary()
     print(f"사전: 브랜드 {len(products):,}개, 성분 {len(ingredients):,}개", flush=True)
 
     hit_unique = hit_reports = total_reports = 0
     miss = []
     for name, n in rows:
         total_reports += n
-        if lookup(name, products, ingredients):
+        if lookup(name, products, ingredients, known_combos):
             hit_unique += 1
             hit_reports += n
         else:
