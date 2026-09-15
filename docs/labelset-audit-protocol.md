@@ -70,6 +70,51 @@ FDA 신호보고서 `info` 텍스트에 **키워드 규칙**으로 자동으로 
 | `source_url` | 원본 보고서(분기 페이지). 주의: 분기당 100+쌍이 공유하므로 그룹 키로 못 씀 |
 | `info` | 판정 근거 원문 |
 
+## 전수 검사 결과 (2,268행 census)
+
+워크시트(435행) 넘어 **정답지 전량 2,268행**을 원문(`info`) 기준으로 검토했다.
+산출: `_probe/out/labelset_census_reviewed.csv` (컬럼 `review_label`, `review_flag`).
+
+방식 — info 블록 단위로 성격을 나눠 판정:
+- `mixed_reviewed` (348행) — 조치+불요 공존. **제품별 사람/LLM 판정**(핵심 검토 대상).
+- `pure_update` (790) / `pure_update_trunc` (352) — 라벨 업데이트만 → 양성.
+- `pure_noaction` (96) → 음성. `pending`(650)/`other`(1) → 보류.
+- `oldformat_reviewed` (31) — 구형식("added to labeling", "approved REMS", "recall" 등) 개별 판정.
+
+**결과**: 원본 자동분류(v1) vs 전수 검토가 **95행(4.2%) 불일치**.
+세그먼트별 오류 — mixed 62, oldformat 17, pure_update 8, trunc 5, no-action 3.
+검토 후 분포 양성 1,233 / 음성 659 / 보류 376 (자동은 1,257/690/321 → **양성 24건 순감**, 다제품 블록 과대계상 해소).
+
+### 원문 검증 한계 (★ 반드시 인지)
+
+`scrape_fda_signals.py`가 `info`를 **300자에서 절단**(148행)하며, **모던 FDA 신호
+페이지는 소멸**했다(AEMS 전환, 라이브 URL이 10자만 반환·Wayback 스냅샷 없음).
+따라서 **잘림+업데이트만 보이는 352행(`pure_update_trunc`)은 뒤에 숨은 no-action
+절을 배제할 수 없다** — 양성으로 두되 검증 불가로 표시. 아카이브가 남은 245행만
+전체 원문 확인 가능. 정답지 재수집은 소스 소멸로 사실상 불가하니, 지금 확보분 보존이 중요.
+
+## classify_signals v2 (자동분류 개선)
+
+감사에서 드러난 오분류 패턴을 고친 `_probe/classify_signals_v2.py`. 전수 census를
+정답으로 잰 정확도: **v1 95.8% → v2 96.7%** (개선 23행·악화 2행).
+
+| 세그먼트 | v1 | v2 |
+|---|---|---|
+| mixed (다제품 귀속) | 82.2% | 83.3% |
+| oldformat (구형식 조치) | 45.2% | **74.2%** |
+| pure_noaction | 96.9% | 97.9% |
+| pure_update | 99.0% | 99.5% |
+
+수정 내용:
+1. **boxed-warning 오탐 제거** — "boxed warning ... is adequate/already addressed"(기존 라벨 적정=음성)를 조치로 오인하던 것 차단. 단 "addition of a boxed warning"(신규 추가=양성)은 유지.
+2. **구형식 조치 인식** — "added to the ... section", "approved ... REMS", "instructions for use", "recall", "class labeling", "container/carton label revised" 등 추가.
+3. **v1 키워드 전량 보존** — withdrawal·safety communication·required changes 누락 방지.
+
+**남는 한계**: 규칙 기반 제품별 귀속은 mixed 블록에서 83%가 상한. 한 블록이 여러 성분을
+나열하고 일부만 조치한 경우(항정신병약·스타틴·GLP-1 등)는 **LLM/사람 판정이 답**이며,
+census의 `mixed_reviewed` 라벨을 정답으로 삼는다. 다제품이 한 행에 뭉개진 11건은
+상류 스크래핑의 제품 분리로 별도 해결.
+
 ## 데이터 보존 주의
 
 `_probe/`, `out/`, `*.csv` 는 `.gitignore` 대상이라 정답지·워크시트는 git 에 안 들어간다.

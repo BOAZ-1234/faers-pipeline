@@ -108,7 +108,7 @@
 **게이트**: Recall@K · Lift · 리드타임 확정
 
 **정답지 품질** (채점의 기준 자체라 D단계 착수 전 처리 권장, 장수연 담당)
-- [ ] ★ 라벨 분류 감사(12장) — 정답지 양성/음성/보류 분류를 자동 파싱(`_probe/classify_signals.py`)으로 붙였는데, 한 `info` 블록에 여러 제품 결과가 섞인 경우 사람이 대조 필요. **"200건" 근거 확정**: 임의 숫자 대신 위험군 전수(census)로 재정의 — 2,268쌍 중 혼합건 335건(대조필수)+비혼합 무작위 100건. 워크시트 생성 도구 `scoring/audit_labelset.py`, 프로토콜 `docs/labelset-audit-protocol.md`. 사람 대조는 미완
+- [x] ★ 라벨 분류 감사(12장) — 자동 파싱 라벨을 **2,268행 전수** 원문 검토(census) 완료. 원본 자동분류와 **95행(4.2%) 불일치** 정정(다제품 블록 양성 과대계상 등). 산출: `_probe/out/labelset_census_reviewed.csv`, 도구 `scoring/audit_labelset.py`, 개선 분류기 `_probe/classify_signals_v2.py`(정확도 95.8→96.7%), 프로토콜 `docs/labelset-audit-protocol.md`. **주의**: 모던 FDA 소스 페이지 소멸+300자 절단으로 352행은 원문 재검증 불가(양성 처리·플래그)
 - [ ] ★ 정답지 2018·2019년 분기 확인 — PR#20(OPEN)에서 2018 Q1~Q3 복구(1,715→2,268쌍), 리뷰에서 source_url 버그 지적돼 수정 대기. 2019년치 포함 여부 미확인
 
 - [ ] 리드 — 랭킹 가중치 학습 + MLflow
