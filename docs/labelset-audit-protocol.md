@@ -5,7 +5,7 @@
 
 ## 왜 하나
 
-정답지의 양성/음성/보류 라벨은 장수연 0단계 `classify_signals`(`_probe/classify_signals.py`)가
+정답지의 양성/음성/보류 라벨은 장수연 0단계 `classify_signals`(`labelset/classify_signals.py`)가
 FDA 신호보고서 `info` 텍스트에 **키워드 규칙**으로 자동으로 붙였다. 한 `info` 블록에
 여러 제품의 상반된 결과가 섞이면(예: 성분 5종을 나열한 뒤 일부만 라벨 업데이트,
 나머지는 "no action") 코드가 **제품명의 문장 내 위치**로 기계 귀속하므로 오분류가 난다.
@@ -42,7 +42,7 @@ FDA 신호보고서 `info` 텍스트에 **키워드 규칙**으로 자동으로 
 
 1. 워크시트 생성
    ```bash
-   python -m scoring.audit_labelset          # → _probe/out/labelset_audit.csv
+   python -m scoring.audit_labelset          # → labelset/out/labelset_audit.csv
    python -m scoring.audit_labelset --sample 150   # 표본 크기 조정
    ```
    워크시트는 **대조필수 먼저**, 그 안에서 **같은 `block_id`(info 블록)의 여러 제품이
@@ -73,7 +73,8 @@ FDA 신호보고서 `info` 텍스트에 **키워드 규칙**으로 자동으로 
 ## 전수 검사 결과 (2,268행 census)
 
 워크시트(435행) 넘어 **정답지 전량 2,268행**을 원문(`info`) 기준으로 검토했다.
-산출: `_probe/out/labelset_census_reviewed.csv` (컬럼 `review_label`, `review_flag`).
+산출: `labelset/out/labelset_census_reviewed.csv` (컬럼 `review_label`, `review_flag`).
+최종 정정 라벨은 `labelset/out/fda_signals.csv` 의 `label`(+`label_basis`) 컬럼으로 통합돼 있다.
 
 방식 — info 블록 단위로 성격을 나눠 판정:
 - `mixed_reviewed` (348행) — 조치+불요 공존. **제품별 사람/LLM 판정**(핵심 검토 대상).
@@ -100,7 +101,7 @@ FDA 신호보고서 `info` 텍스트에 **키워드 규칙**으로 자동으로 
 
 ## classify_signals v2 (자동분류 개선)
 
-감사에서 드러난 오분류 패턴을 고친 `_probe/classify_signals_v2.py`. 전수 census를
+감사에서 드러난 오분류 패턴을 `labelset/classify_signals.py`에 반영(구 v2). 전수 census를
 정답으로 잰 정확도: **v1 95.8% → v2 96.7%** (개선 23행·악화 2행).
 
 | 세그먼트 | v1 | v2 |

@@ -108,7 +108,7 @@
 **게이트**: Recall@K · Lift · 리드타임 확정
 
 **정답지 품질** (채점의 기준 자체라 D단계 착수 전 처리 권장, 장수연 담당)
-- [x] ★ 라벨 분류 감사(12장) — 자동 파싱 라벨을 **2,268행 전수** 원문 검토(census) 완료. 원본 자동분류와 **95행(4.2%) 불일치** 정정(다제품 블록 양성 과대계상 등). 개선 규칙은 `classify_signals`에 정식 반영(v2, 전수 census 대비 95.8→96.7%). 산출: `_probe/out/labelset_census_reviewed.csv`, 도구 `scoring/audit_labelset.py`, 프로토콜 `docs/labelset-audit-protocol.md`. **원문 검증**: 300자 절단분 352행 중 `download_fda_signals.py`(web.archive)로 받은 raw parquet로 **79행 원문 재확인=전부 정상**, 나머지 273행은 모던 스냅샷 부재로 미확인(위험 낮음)
+- [x] ★ 라벨 분류 감사(12장) — 자동 파싱 라벨을 **2,268행 전수** 원문 검토(census) 완료. 원본 자동분류와 **95행(4.2%) 불일치** 정정(다제품 블록 양성 과대계상 등). 정답지·분류기를 `_probe`→**`labelset/` 패키지로 승격**(`labelset/classify_signals.py`, `download_fda_signals.py`). 최종 라벨은 `labelset/out/fda_signals.csv`의 `label` 컬럼에 통합, 자동분류 정확도 96.8%. **원문**: `info` 300자 절단을 없애고 `info_full`(무절단) 추가 — **1,910/2,268행 전체 원문 확보**, 358행만 모던 FDA 소멸(AEMS)로 원문 없음. 프로토콜 `docs/labelset-audit-protocol.md`
 - [ ] ★ 정답지 2018·2019년 분기 확인 — PR#20(OPEN)에서 2018 Q1~Q3 복구(1,715→2,268쌍), 리뷰에서 source_url 버그 지적돼 수정 대기. 2019년치 포함 여부 미확인
 
 - [ ] 리드 — 랭킹 가중치 학습 + MLflow

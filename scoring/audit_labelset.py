@@ -136,8 +136,8 @@ def _summary(df: pd.DataFrame, sheet: pd.DataFrame) -> str:
 
 def main() -> None:
     repo = Path(__file__).resolve().parents[1]
-    default_in = repo / "_probe" / "out" / "fda_signals_labeled.csv"
-    default_out = repo / "_probe" / "out" / "labelset_audit.csv"
+    default_in = repo / "labelset" / "out" / "fda_signals_labeled.csv"
+    default_out = repo / "labelset" / "out" / "labelset_audit.csv"
 
     ap = argparse.ArgumentParser(description="정답지 라벨 감사 워크시트 생성")
     ap.add_argument("--in", dest="inp", type=Path, default=default_in,
