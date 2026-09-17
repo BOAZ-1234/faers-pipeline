@@ -26,11 +26,15 @@ python -m labelset.classify_signals       # info_full 기준 자동 라벨 → l
 2. **정정(`label`)** — 사람/LLM 전수 검토 결과(census). 다제품 블록 등 규칙이 틀린 곳을 바로잡은 **정답**. 채점엔 이걸 쓴다.
 3. **근거(`label_basis`)** — 각 행 판정이 어떤 유형이었는지(`mixed_reviewed`, `pure_update`, `trunc_verified/unverified`, `oldformat_reviewed` 등).
 
-## 원문 보존 주의
+## 원문(info_full)과 봇 차단
 
 `info`는 스크랩 시 300자로 잘렸었다(구). 지금은 `info_full`이 무절단 원문이며
-**2,268행 중 1,910행 확보**, 358행은 모던 FDA 페이지 소멸(AEMS 전환)로 web.archive
-스냅샷조차 없어 300자가 최선(`info_status='truncated_only'`). 라이브 소스가 죽었으므로
-`out/fda_signals_raw.parquet`(원문 전체 텍스트) 보존이 중요.
+**2,268행 중 2,247행(99.1%) 확보**, 21행만 미확보(`info_status='truncated_only'`, 전부 순수 양성).
+
+⚠ 라이브 fda.gov 신호 페이지는 **사라진 게 아니라 봇 차단(abuse-detection)** 된다 —
+`requests`로는 `apology_objects/abuse-detection`로 404, **브라우저로는 정상**. 그래서:
+- `download_fda_signals.py`(requests+web.archive): 아카이브 스냅샷엔 되나 라이브 fda.gov엔 막힘.
+- 신규 분기·절단분 원문은 **브라우저(Claude in Chrome)로 표 추출**해야 한다.
+`out/fda_signals_raw.parquet`(원문)도 보존 소스로 함께 쓴다.
 
 감사 절차·발견은 [`docs/labelset-audit-protocol.md`](../docs/labelset-audit-protocol.md).

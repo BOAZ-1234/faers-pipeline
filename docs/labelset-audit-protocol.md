@@ -82,22 +82,24 @@ FDA 신호보고서 `info` 텍스트에 **키워드 규칙**으로 자동으로 
 - `pure_noaction` (96) → 음성. `pending`(650)/`other`(1) → 보류.
 - `oldformat_reviewed` (31) — 구형식("added to labeling", "approved REMS", "recall" 등) 개별 판정.
 
-**결과**: 원본 자동분류(v1) vs 전수 검토가 **95행(4.2%) 불일치**.
-세그먼트별 오류 — mixed 62, oldformat 17, pure_update 8, trunc 5, no-action 3.
-검토 후 분포 양성 1,233 / 음성 659 / 보류 376 (자동은 1,257/690/321 → **양성 24건 순감**, 다제품 블록 과대계상 해소).
+**결과**: 원본 자동분류 vs 전수 검토가 **116행 불일치** 정정(초기 95 + 전체 원문 확보 후 혼합
+블록 재검토 21). 주 오류는 다제품 블록에서 일부만 조치인데 전부 양성 처리한 것.
+최종 분포 **양성 1,212 / 음성 397 / 보류 659**.
 
-### 원문 검증 한계 (★ 반드시 인지)
+### 원문 확보 (★ 이력 — "소스 소멸"은 오판이었음)
 
-`scrape_fda_signals.py`가 `info`를 **300자에서 절단**(148행)한다. 라이브 fda.gov 신호
-페이지는 AEMS 전환으로 직접 URL이 죽었지만, **`download_fda_signals.py`가 `web.archive.org`
-스냅샷(raw `id_`)으로 원문을 되살려 받는다** — 최근(2026-09-05) 이 코드로 받은
-`fda_signals_raw.parquet`(2008~2020, 448행, 전체 텍스트)가 그 산출이다.
+`scrape_fda_signals.py`가 `info`를 **300자에서 절단**(148행)해, 절단분은 뒤의 no-action 절이
+안 보였다. 처음엔 라이브 fda.gov 신호 페이지가 10자만 반환해 **"소스 소멸(AEMS 전환)"로 오판**
+했으나, 실제로는 **FDA의 봇 차단(abuse-detection)** 이었다 — `requests`/세션/헤더 무엇으로도
+`apology_objects/abuse-detection`로 404. **브라우저(Claude in Chrome)로는 전부 정상 로드**된다.
 
-이 raw로 **잘린 352행 중 79행의 전체 원문을 회수해 재검토한 결과 전부 양성 확정
-(오류 0건)** — 잘린 뒤의 no-action 절은 모두 *다른 제품* 얘기였다. 나머지 273행은
-모던(2021~2026)이라 web.archive 스냅샷이 없어 원문 재확인이 안 되지만, 검증 가능한
-79행에서 오류가 0이라 잔여 위험은 낮다. `review_flag`로 `trunc_verified`(79)와
-`trunc_unverified`(273)를 구분한다. 소스 원본이 죽었으므로 raw parquet 보존이 중요.
+복구 방식: 절단분이 있는 21개 분기 페이지를 브라우저로 열어(모던은 fda.gov 직접, 일부는
+web.archive `id_` 스냅샷) 표를 JS로 추출 → 블롭 다운로드 → 공백무시 접두사 매칭으로 붙임.
+결과 **전체 원문 확보 2,247/2,268행(99.1%)**, 미확보 21행뿐(전부 순수 양성 또는 검토완료).
+`info_full`(무절단)·`info_status`(already_full/recovered/truncated_only) 컬럼으로 표시.
+
+교훈: 라이브 fda.gov 스크랩은 봇 차단되므로 신규 분기 수집은 **브라우저 추출**이 필요.
+`download_fda_signals.py`(requests+web.archive)는 아카이브분엔 되나 라이브 fda.gov엔 막힌다.
 
 ## classify_signals v2 (자동분류 개선)
 

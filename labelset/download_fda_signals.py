@@ -1,8 +1,11 @@
 """[커버리지 확보 v2] FDA 분기별 잠재 안전신호 보고서 다운로더 (2008~현재, 2018·2019 포함).
 
-기존 scrape_fda_signals.py 를 한 겹 더 감싼다. 라이브 fda.gov 신호 페이지는 AEMS 전환으로
-직접 URL이 죽었으므로, 각 보고서 URL을 **web.archive.org 스냅샷**으로 해소(resolve)해 받는다.
-archive-it(2018·2019 등) 스냅샷도 raw(id_) 형태로 원문 표를 그대로 얻는다.
+기존 scrape_fda_signals.py 를 한 겹 더 감싼다. 각 보고서 URL을 **web.archive.org 스냅샷**으로
+해소(resolve)해 받는다. archive-it(2018·2019 등) 스냅샷도 raw(id_) 형태로 원문 표를 얻는다.
+
+⚠ 라이브 fda.gov 자체는 **사라진 게 아니라 봇 차단(abuse-detection)** 이라 requests 로는 404다
+(apology_objects/abuse-detection). 아카이브 스냅샷은 이 코드로 되지만, 라이브 fda.gov 신규
+분기는 브라우저(Claude in Chrome)로 표를 추출해야 한다(README 참고).
 
 전략:
     resolve(url) → web.archive.org raw(id_) 스냅샷 URL
