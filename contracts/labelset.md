@@ -6,7 +6,7 @@ FDA 분기 신호보고서에서 만든 **정답지**. 채점기의 정답 기�
 
 ```
 FDA 분기 신호보고서 스크랩
-  → classify_signals (하경 0단계): info 텍스트 → label ∈ {양성, 음성, 보류}
+  → classify_signals (장수연 0단계): info 텍스트 → label ∈ {양성, 음성, 보류}
   → scoring.ground_truth.build_labelset: 쌍 종결 + 코호트 컷오프 분할
 ```
 
@@ -18,7 +18,7 @@ FDA 분기 신호보고서 스크랩
 | `signal` | 부작용 표기 원문 |
 | `year`, `q_start` | 최초/각 등장 분기 (컷오프 근거) |
 | `quarter_label` | 분기 라벨 문자열 (등장 분기 수 집계용) |
-| `label` | 3분류 `{양성, 음성, 보류}` — 하경 산출 |
+| `label` | 3분류 `{양성, 음성, 보류}` — 장수연 산출(`classify_signals`) |
 
 ## 라벨 의미
 

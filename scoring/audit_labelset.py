@@ -1,7 +1,7 @@
 """정답지 라벨 감사 워크시트 생성 — 자동 3분류(양성/음성/보류) 사람 대조용.
 
 배경(계획서 12장, action-plan 5장):
-  라벨은 하경 0단계 `classify_signals` 가 **키워드 규칙**으로 자동으로 붙였다.
+  라벨은 장수연 0단계 `classify_signals` 가 **키워드 규칙**으로 자동으로 붙였다.
   한 신호보고서(info) 안에 여러 제품의 상반된 결과가 섞이면
   (예: "Entyvio was updated ... for Tysabri no action was necessary")
   코드가 제품명의 문장 내 위치로 기계 귀속하므로 **오분류 위험**이 있다.
