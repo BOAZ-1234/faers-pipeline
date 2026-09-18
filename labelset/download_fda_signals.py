@@ -174,7 +174,7 @@ def parse_report(url, label) -> pd.DataFrame:
     got = fetch(url)
     if not got:
         return pd.DataFrame()
-    html, real = got
+    html, resolved_url = got   # fetch 가 돌려준 '실제로 받아온 스냅샷 URL'
     try:
         tables = pd.read_html(StringIO(html))
     except ValueError:
@@ -187,7 +187,7 @@ def parse_report(url, label) -> pd.DataFrame:
         return pd.DataFrame()
     t = t[[c for c in ("product", "signal", "info") if c in t.columns]].copy()
     t["quarter_label"] = label
-    t["source_url"] = url
+    t["source_url"] = resolved_url   # 재현 가능하도록 원본 url 이 아닌 실제 받은 스냅샷 기록
     m = QUARTER_PAT.search(label)
     t["year"] = int(m.group(3)) if m else None
     t["q_start"] = m.group(1).capitalize() if m else None
