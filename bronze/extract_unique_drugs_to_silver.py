@@ -1,30 +1,10 @@
 # 브론즈 계층(stage_a_raw.faers_drug)의 원본 약물 데이터에서 중복을 제거한 고유 약물명(Unique Drugs)을 추출하고,
 # 이를 실버 계층(stage_b_silver.dict_unique_drugs) 사전에 Iceberg 포맷으로 영구 적재하는 핵심 파이프라인 스크립트입니다.
-import os
-from dotenv import load_dotenv
-from pyspark.sql import SparkSession
+from spark_session import build_spark
 
-# 1. AWS 및 Spark 세션 세팅
-load_dotenv()
-aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
-aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
-BUCKET_NAME = "boaz-1234-825494477740-ap-northeast-2-an"
-
+# 1. Spark 세션 세팅 (키가 있으면 키, EC2에서는 인스턴스 역할로 자동 인증)
 print("⏳ Spark 세션을 시작합니다...")
-spark = SparkSession.builder \
-    .appName("Extract_Unique_Drugs") \
-    .config("spark.driver.memory", "4g") \
-    .config("spark.jars.packages", "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262") \
-    .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
-    .config("spark.sql.catalog.my_catalog", "org.apache.iceberg.spark.SparkCatalog") \
-    .config("spark.sql.catalog.my_catalog.type", "hadoop") \
-    .config("spark.sql.catalog.my_catalog.warehouse", f"s3a://{BUCKET_NAME}/iceberg_warehouse") \
-    .config("spark.hadoop.fs.s3a.access.key", aws_access_key) \
-    .config("spark.hadoop.fs.s3a.secret.key", aws_secret_key) \
-    .config("spark.hadoop.fs.s3a.endpoint", "s3.ap-northeast-2.amazonaws.com") \
-    .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
-    .config("spark.hadoop.fs.s3a.path.style.access", "true") \
-    .getOrCreate()
+spark = build_spark("Extract_Unique_Drugs", driver_memory="4g")
 
 # 2. 고유 약물명 추출 쿼리 (가상 메모리에만 올려둠)
 print("\n🔍 4,000만 건 데이터 중복 제거 및 추출 중...")
