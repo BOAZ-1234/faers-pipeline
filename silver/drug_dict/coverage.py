@@ -1,8 +1,9 @@
 """
-C세부1 — 커버리지 1차 측정 (§8: GPU 산정의 전제조건)
+C세부1 — 커버리지 측정 (§8: GPU 산정의 전제조건)
 
 S3의 faers_drug 테이블에서 FAERS 자유기재 약물명을 뽑아 match.py로 정규화한 뒤
 drug_ingredient_map(브랜드명/성분명)과 대조해 몇 %가 1단계(사전 조회)에서 잡히는지 잰다.
+drugname으로 실패하면 prod_ai(FDA가 직접 채운 성분 필드) 폴백도 같이 잰다.
 
 이 스크립트만 예외적으로 duckdb에 의존한다 — Iceberg 테이블을 직접 읽어야 해서
 stdlib만으로는 안 됨(다른 drug_dict 스크립트는 전부 stdlib만 씀).
@@ -16,27 +17,40 @@ stdlib만으로는 안 됨(다른 drug_dict 스크립트는 전부 stdlib만 씀
 """
 import duckdb
 
-from match import load_dictionary, lookup
+from match import load_dictionary, lookup, lookup_with_prod_ai
 
 BUCKET = "boaz-1234-825494477740-ap-northeast-2-an"
 FAERS_DRUG_TABLE = f"s3://{BUCKET}/iceberg_warehouse/stage_a_raw/faers_drug"
 
 
-def fetch_drugname_counts() -> list[tuple[str, int]]:
-    """FAERS drugname을 대문자+공백정리 후 집계.
+def fetch_drugname_counts() -> list[tuple[str, int, str | None]]:
+    """FAERS drugname을 대문자+공백정리 후 집계, 이름당 최빈 prod_ai도 같이 뽑는다.
 
     대문자/공백만 다른 표기("Aspirin"·"ASPIRIN"·" Aspirin ")를 각각 다른 고유명으로
     세면 분모가 부풀려진다 — 처음엔 이 정리 없이 재서 658,552개가 나왔는데, 정리하고
     나니 535,316개로 줄었고 이게 B단계 쪽에서 별도로 만든 dict_unique_drugs 테이블
-    개수와 정확히 일치했다(데이터 차이가 아니라 집계 방식 차이였음을 서로 확인)."""
+    개수와 정확히 일치했다(데이터 차이가 아니라 집계 방식 차이였음을 서로 확인).
+
+    prod_ai는 같은 drugname이라도 신고서마다 값이 다를 수 있어(자유기재라), 가장 많이
+    등장한 값(최빈값) 하나를 대표로 쓴다."""
     con = duckdb.connect()
     con.execute("INSTALL iceberg; LOAD iceberg; INSTALL httpfs; LOAD httpfs;")
     con.execute("CREATE SECRET (TYPE s3, PROVIDER credential_chain, REGION 'ap-northeast-2');")
     return con.execute(f"""
-        SELECT upper(trim(drugname)) AS name, count(*) AS n_reports
-        FROM iceberg_scan('{FAERS_DRUG_TABLE}')
-        WHERE drugname IS NOT NULL AND trim(drugname) != ''
-        GROUP BY 1
+        WITH base AS (
+          SELECT upper(trim(drugname)) AS name,
+                 CASE WHEN prod_ai IS NOT NULL AND trim(prod_ai) != '' THEN upper(trim(prod_ai)) END AS pai
+          FROM iceberg_scan('{FAERS_DRUG_TABLE}')
+          WHERE drugname IS NOT NULL AND trim(drugname) != ''
+        ),
+        name_totals AS (SELECT name, count(*) AS total FROM base GROUP BY 1),
+        pai_counts AS (
+          SELECT name, pai, count(*) AS n,
+                 row_number() OVER (PARTITION BY name ORDER BY count(*) DESC) AS rn
+          FROM base WHERE pai IS NOT NULL GROUP BY name, pai
+        )
+        SELECT t.name, t.total, p.pai
+        FROM name_totals t LEFT JOIN pai_counts p ON t.name = p.name AND p.rn = 1
     """).fetchall()
 
 
@@ -49,17 +63,24 @@ def main():
     print(f"사전: 브랜드 {len(products):,}개, 성분 {len(ingredients):,}개", flush=True)
 
     hit_unique = hit_reports = total_reports = 0
+    hit_unique_dict_only = hit_reports_dict_only = 0
     miss = []
-    for name, n in rows:
+    for name, n, pai in rows:
         total_reports += n
-        if lookup(name, products, ingredients, known_combos):
+        dict_hit = lookup(name, products, ingredients, known_combos)
+        if dict_hit:
+            hit_unique_dict_only += 1
+            hit_reports_dict_only += n
+        if lookup_with_prod_ai(name, pai, products, ingredients, known_combos):
             hit_unique += 1
             hit_reports += n
         else:
             miss.append((name, n))
 
-    print(f"\n[고유명 기준] {hit_unique:,} / {len(rows):,} = {hit_unique / len(rows) * 100:.2f}%")
-    print(f"[신고건 기준] {hit_reports:,} / {total_reports:,} = {hit_reports / total_reports * 100:.2f}%")
+    print(f"\n[사전만] 고유명 {hit_unique_dict_only:,}/{len(rows):,} = {hit_unique_dict_only / len(rows) * 100:.2f}%  "
+          f"신고건 {hit_reports_dict_only:,}/{total_reports:,} = {hit_reports_dict_only / total_reports * 100:.2f}%")
+    print(f"[사전+prod_ai 폴백] 고유명 {hit_unique:,}/{len(rows):,} = {hit_unique / len(rows) * 100:.2f}%  "
+          f"신고건 {hit_reports:,}/{total_reports:,} = {hit_reports / total_reports * 100:.2f}%")
     print(f"못 잡은 고유명(2·3단계 후보, GPU 산정 입력값): {len(miss):,}개")
 
     miss.sort(key=lambda x: -x[1])

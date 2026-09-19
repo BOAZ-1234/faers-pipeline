@@ -12,7 +12,7 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
-from normalize import normalize_query, extract_bracket_alt, split_backslash_parts
+from normalize import normalize_query, extract_bracket_alt, split_backslash_parts, resolve_prod_ai
 
 
 def load_dictionary() -> tuple[set[str], set[str], set[str]]:
@@ -64,3 +64,14 @@ def lookup(name: str, products: set[str], ingredients: set[str], known_combos: s
             return True
 
     return False
+
+
+def lookup_with_prod_ai(name: str, prod_ai: str | None, products: set[str],
+                         ingredients: set[str], known_combos: set[str]) -> bool:
+    """1단계: 사전 조회(lookup) 먼저 시도, 실패하면 prod_ai 폴백.
+    prod_ai는 FDA가 직접 채운 필드라 사전 대조 없이 정규화만 해서 받아들인다
+    (캐스케이드 계약 회의 후속 논의, §7 게이트 기준을 DiAna 정답지 기반으로 바꾸면서
+    prod_ai는 입력으로 재분류함 — 2026-09-18)."""
+    if lookup(name, products, ingredients, known_combos):
+        return True
+    return resolve_prod_ai(prod_ai) is not None
