@@ -15,11 +15,24 @@ _probe/define_eval_window.py 프로토타입을 scoring 패키지로 재구축�
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 import pandas as pd
 
 from scoring.keys import SignalKey, make_key
+
+# 감사본 정답지 gold (사람+LLM 전수 감사로 정정한 label, 재생성 불가라 git 추적).
+# 계약: contracts/labelset.md. 스크랩 원문(info_full 등)은 제외한 authored 컬럼만.
+GOLD_PATH = Path(__file__).resolve().parents[1] / "labelset" / "data" / "labelset_gold.csv"
+
+
+def load_gold(path: str | Path = GOLD_PATH) -> pd.DataFrame:
+    """감사본 gold CSV → build_labelset 입력 DataFrame.
+
+    컬럼: product, signal, label(감사본), label_basis, year, q_start, quarter_label.
+    채점은 감사본 `label` 로만 한다 — 자동분류 `label3` 는 gold 에 없다(참고값이라 제외)."""
+    return pd.read_csv(path, encoding="utf-8-sig")
 
 # 분기 시작월 → 분기 인덱스
 QMAP = {"January": 1, "April": 2, "July": 3, "October": 4}

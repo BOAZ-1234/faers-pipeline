@@ -33,4 +33,10 @@ samples/
 #브론즈 데이터 폴더
 bronze/data
 
+# 정답지 gold — 감사본 label(2,268행, 사람+LLM 정정, 재생성 불가)만 예외로 추적.
+# 채점 재현성용. info_full 등 스크랩 원문은 제외했고 나머지 labelset/data/ 는 계속 무시.
+!labelset/data/
+labelset/data/*
+!labelset/data/labelset_gold.csv
+
 
