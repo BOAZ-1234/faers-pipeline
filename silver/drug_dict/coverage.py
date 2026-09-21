@@ -40,7 +40,27 @@ def fetch_drugname_counts() -> list[tuple[str, int]]:
     """).fetchall()
 
 
+def dump_miss(miss: list[tuple[str, int]], path: str) -> None:
+    """1단계에서 못 잡은 (고유명, 신고수)를 CSV로 저장 — 2단계(similarity.py) 입력.
+    예전엔 상위 15개를 print만 했는데, 2·3단계가 이 전량을 입력으로 받아야 해서
+    파일로 뽑는다. drugname은 fetch_drugname_counts()에서 이미 upper(trim())된 값이라
+    similarity 쪽에서도 같은 표기를 그대로 받는다."""
+    import csv
+    miss = sorted(miss, key=lambda x: -x[1])
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["name", "n_reports"])
+        w.writerows(miss)
+    print(f"→ miss {len(miss):,}개 저장: {path}", flush=True)
+
+
 def main():
+    import argparse
+    ap = argparse.ArgumentParser(description="1단계 커버리지 측정 + miss 덤프")
+    ap.add_argument("--dump-miss", metavar="PATH",
+                    help="1단계 실패 고유명을 CSV로 저장(2단계 similarity.py 입력)")
+    args = ap.parse_args()
+
     print("FAERS drugname 집계 중 (S3 Iceberg 전체 스캔 — 수 분 걸림)...", flush=True)
     rows = fetch_drugname_counts()
     print(f"고유 약물명: {len(rows):,}개", flush=True)
@@ -66,6 +86,9 @@ def main():
     print("\n못 잡은 것 중 신고 건수 많은 상위 15개:")
     for name, n in miss[:15]:
         print(f"  {n:>8,}  {name}")
+
+    if args.dump_miss:
+        dump_miss(miss, args.dump_miss)
 
 
 if __name__ == "__main__":
