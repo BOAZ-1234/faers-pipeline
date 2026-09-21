@@ -13,7 +13,8 @@
 | Budgets | `boaz-faers-projects` | 월 $15 예산 알림 |
 | IAM 정책 | `faers-team-s3` | S3 읽기 + `stage_b_silver`만 쓰기 (bronze는 읽기 전용) — [`policies/faers-team-s3.json`](policies/faers-team-s3.json) |
 | IAM 정책 | `faers-team-ec2` | 작업 서버 1대 시작/중지/SSM 접속 — [`policies/faers-team-ec2.json`](policies/faers-team-ec2.json) |
-| IAM 그룹 | `faers-team` | 위 두 정책 연결, 팀원 사용자를 여기에 넣는다 |
+| IAM 정책 | `faers-team-selfkeys` | 팀원이 **본인** 액세스 키만 만들고 지울 수 있음 (`${aws:username}`으로 본인 계정에 한정) — [`policies/faers-team-selfkeys.json`](policies/faers-team-selfkeys.json) |
+| IAM 그룹 | `faers-team` | 위 세 정책 연결, 팀원 사용자를 여기에 넣는다 |
 | IAM 역할 | `faers-ec2-role` | 서버가 쓰는 역할: `faers-team-s3` + `AmazonSSMManagedInstanceCore` |
 | EC2 | `faers-work` (`i-09ea3552c292bd78c`) | m5.xlarge(4코어/16GB), Amazon Linux 2023, gp3 30GiB |
 | CloudWatch 경보 | `faers-work-idle-stop` | CPU 평균 3% 미만이 2시간 이어지면 서버 자동 중지 |
@@ -42,6 +43,22 @@
 - 메모리 16GB를 나눠 쓴다. 8,400만 행급 집계는 한 번에 한 명씩.
 - 서버는 **인스턴스 역할**로 S3에 접근한다. 서버에 액세스 키를 넣거나 `.env`를 만들지 않는다.
 - 요금: 시간당 약 $0.24 (m5.xlarge, 서울, Linux 온디맨드). 월 예산 $15 ≈ 60시간. 중지하면 서버 요금은 멈추고 디스크(30GiB)만 과금된다.
+
+## 로컬 터미널에서 서버 접속 (선택, 액세스 키 필요)
+
+브라우저 터미널이 불편하면 로컬에서 접속할 수 있다. 액세스 키(프로그램용 아이디/비밀번호)가 필요하고, **본인이 직접 만든다** (비밀 키가 채팅 등에 오가지 않게).
+
+1. 콘솔 우측 상단 본인 이름 → **보안 자격 증명 → 액세스 키 만들기** → 사용 사례 **CLI** → 생성
+2. **Secret Access Key는 이 화면에서 한 번만 보인다.** 바로 `aws configure`에 붙여넣는다 (리전 `ap-northeast-2`)
+3. 로컬에 **AWS CLI v2**와 **Session Manager 플러그인**을 설치한다
+4. 확인: `aws sts get-caller-identity` → 본인 사용자 이름이 나오면 정상
+5. 접속: `aws ssm start-session --target i-09ea3552c292bd78c`
+
+규칙:
+- 키를 **채팅, 레포, `.env` 커밋에 넣지 않는다** (공개 레포). `aws configure`는 `~/.aws/credentials`에 저장하므로 레포와 무관하다.
+- 유출이 의심되면 IAM에서 그 키를 즉시 **비활성화**한다. 사용자당 키는 최대 2개.
+- 로컬에서 키로 S3를 대량으로 읽으면 전송비가 다시 생긴다. **무거운 작업은 서버에서** 하고 로컬은 접속용으로만 쓴다.
+- `ssm:SendCommand`(터미널 없이 서버에 명령 전송)는 필요할 때 범위를 서버 1대로 좁혀 추가한다. 지금은 열지 않았다.
 
 ## 서버 최초 세팅
 
