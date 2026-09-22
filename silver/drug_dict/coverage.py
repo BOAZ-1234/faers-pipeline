@@ -13,8 +13,16 @@ stdlib만으로는 안 됨(다른 drug_dict 스크립트는 전부 stdlib만 씀
   aws configure  (S3 읽기 권한 있는 IAM 키)
 
 실행:
-  python3 coverage.py   (S3 전체 스캔이라 수 분 걸림)
+  python3 coverage.py                      (S3 전체 스캔이라 수 분 걸림)
+  python3 coverage.py --out-freq-csv x.csv  (고유명 빈도 CSV도 같이 저장)
+
+--out-freq-csv로 저장하는 (name, n_reports) CSV는 golden/diana_golden.py의
+--freq-csv 인자로 그대로 넘길 수 있다(수동 검수분 근사 필터용, 이슈 #29/PR#32).
 """
+import argparse
+import csv
+from pathlib import Path
+
 import duckdb
 
 from match import load_dictionary, lookup, lookup_with_prod_ai
@@ -54,10 +62,28 @@ def fetch_drugname_counts() -> list[tuple[str, int, str | None]]:
     """).fetchall()
 
 
+def write_freq_csv(path: Path, rows: list[tuple[str, int, str | None]]) -> None:
+    """(name, n_reports) CSV 저장 — golden/diana_golden.py --freq-csv 형식(헤더 1줄 + name,n_reports)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["name", "n_reports"])
+        for name, n, _pai in rows:
+            writer.writerow([name, n])
+
+
 def main():
+    ap = argparse.ArgumentParser(description="C세부1 커버리지 측정")
+    ap.add_argument("--out-freq-csv", type=Path, help="고유명 빈도 CSV 저장 경로 (golden/diana_golden.py --freq-csv용)")
+    args = ap.parse_args()
+
     print("FAERS drugname 집계 중 (S3 Iceberg 전체 스캔 — 수 분 걸림)...", flush=True)
     rows = fetch_drugname_counts()
     print(f"고유 약물명: {len(rows):,}개", flush=True)
+
+    if args.out_freq_csv:
+        write_freq_csv(args.out_freq_csv, rows)
+        print(f"빈도 CSV 저장 → {args.out_freq_csv}", flush=True)
 
     products, ingredients, known_combos = load_dictionary()
     print(f"사전: 브랜드 {len(products):,}개, 성분 {len(ingredients):,}개", flush=True)
