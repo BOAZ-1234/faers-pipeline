@@ -7,7 +7,7 @@ from conftest import load_module
 
 
 def get_module():
-    return load_module("spark_session", "bronze/spark_session.py")
+    return load_module("spark_session", "bronze/loaders/spark_session.py")
 
 
 PROVIDER = "spark.hadoop.fs.s3a.aws.credentials.provider"

@@ -86,16 +86,22 @@ aws sts get-caller-identity       # Arn 에 assumed-role/faers-ec2-role 이 보�
 
 ## 코드에서 S3 접근
 
-`bronze/spark_session.py`의 `build_spark()`를 쓴다. 인증을 환경에 맞게 고른다.
+`bronze/loaders/spark_session.py`의 `build_spark()`를 쓴다. 인증을 환경에 맞게 고른다.
 
 ```python
+# bronze/loaders/ 안에서 실행하는 스크립트는 바로:
 from spark_session import build_spark
+# 다른 폴더(diagnostics/, handoff/, verification/ 등)에서는 경로를 먼저 잡아준다:
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "loaders"))
+from spark_session import build_spark
+
 spark = build_spark("MyJob", driver_memory="8g")
 ```
 
 - `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`가 있으면(로컬 `bronze/.env`) 그 키를 쓴다. `AWS_SESSION_TOKEN`도 있으면 임시 자격증명으로 처리한다.
 - 없으면(EC2) 인스턴스 역할로 자동 인증한다.
-- 기존 스크립트는 세션 설정이 각자 복붙돼 있어서, EC2에서 돌리려면 이 함수로 바꿔야 한다. 이 PR은 `extract_unique_drugs_to_silver.py`만 옮겼고 나머지는 쓰는 시점에 하나씩 옮긴다.
+- 기존 스크립트는 세션 설정이 각자 복붙돼 있어서, EC2에서 돌리려면 이 함수로 바꿔야 한다. 지금은 `extract_unique_drugs_to_silver.py`만 옮겼고 나머지는 쓰는 시점에 하나씩 옮긴다.
 
 `bronze/CLAUDE.md`의 조회 비용 규칙(기본 10건, 그 이상은 확인 후)은 서버에서도 그대로 적용된다.
 

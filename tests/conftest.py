@@ -7,10 +7,10 @@ from pyspark.sql import SparkSession
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
-# bronze/*.py 스크립트끼리 서로 import하므로(예: pipeline_common), bronze/를 sys.path에 넣어준다.
-BRONZE_DIR = str(REPO_ROOT / "bronze")
-if BRONZE_DIR not in sys.path:
-    sys.path.insert(0, BRONZE_DIR)
+# bronze/loaders/*.py 스크립트끼리 서로 import하므로(예: pipeline_common), sys.path에 넣어준다.
+LOADERS_DIR = str(REPO_ROOT / "bronze" / "loaders")
+if LOADERS_DIR not in sys.path:
+    sys.path.insert(0, LOADERS_DIR)
 
 
 def load_module(module_name, relative_path):
