@@ -17,7 +17,7 @@ import zipfile
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "loaders"))
 from load_faers_master import classify_line, harmonize_legacy_schema  # noqa: E402
 from pipeline_common import manifest_status, upsert_manifest  # noqa: E402
 

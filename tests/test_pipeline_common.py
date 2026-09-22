@@ -10,7 +10,7 @@ from conftest import load_module
 
 
 def get_pipeline_common():
-    return load_module("pipeline_common", "bronze/pipeline_common.py")
+    return load_module("pipeline_common", "bronze/loaders/pipeline_common.py")
 
 
 def test_manifest_status_is_none_when_table_does_not_exist(local_iceberg_spark):

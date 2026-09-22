@@ -16,7 +16,7 @@ import zipfile
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "loaders"))
 from load_aers_master import classify_line  # noqa: E402  (로더와 동일한 파싱 판정)
 
 from dotenv import load_dotenv
