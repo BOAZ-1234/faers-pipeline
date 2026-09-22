@@ -5,10 +5,20 @@
 #
 # load_faers_master.py의 classify_line/harmonize_legacy_schema를 그대로 import해서 재사용한다
 # (같은 파싱 로직으로 짜야 원본 로더가 만들었을 결과와 100% 동일한 행이 나온다).
-# 단, write_to_iceberg()는 재사용하지 않는다 — 그 함수는 source_zip 컬럼이 테이블에 있다고
-# 가정하는데, 지금 faers_demo/drug/reac에는 source_zip 컬럼 자체가 없다(그 자체가 지난번에
-# 찾은 별도 문제, 이번 백필의 범위 밖). 그래서 harmonize까지만 재사용하고 source_zip 컬럼은
-# 쓰기 직전에 드롭해서 기존 테이블 스키마와 정확히 맞춘다.
+#
+# 이 스크립트는 이미 실행 완료됐다(load_manifest에 complete로 기록돼 있어 재실행해도
+# already_done()에서 건너뛴다) — 아래는 실행 기록이자, 다음에 비슷한 백필을 할 때 참고할
+# 코드다.
+#
+# ⚠️ 리뷰 지적사항 반영(#39): 처음 실행 당시엔 source_zip 컬럼이 아직 없어서(그 자체가
+# 그때 발견한 별도 문제), 2013Q4 REAC 삭제 키를 primaryid로 썼다. 근데 primaryid는 사례가
+# 나중 분기에 재제출되면 다른 zip에도 등장할 수 있어서, "이 zip 것만 지운다"가 보장되지
+# 않는 위험한 방식이었다 — 실제로 11건이 다른 분기(2020Q3 등)와 겹쳤다.
+# 겹친 11건을 원본 zip에서 직접 대조한 결과 내용이 완전히 동일한 재제출 사례라 이번엔
+# 데이터 손실이 없었지만(라이브 재대조로도 확인), 그건 우연이었지 이 방식이 안전해서가
+# 아니다. 지금은 source_zip 컬럼이 생겼으므로, 아래는 그걸 삭제 키로 쓰는 안전한 버전이다
+# (pipeline_common.delete_partial_rows와 같은 패턴). source_zip은 쓰기 직전에 더 이상
+# 드롭하지 않는다 — 테이블에 이미 그 컬럼이 있다.
 
 import sys
 import os
@@ -88,13 +98,14 @@ def parse_zip_filetype(zip_path, file_type):
 
 
 def build_harmonized_df(rows, header, file_type, source_zip_tag):
-    """harmonize_legacy_schema는 source_zip 컬럼을 요구하므로 태그를 붙였다가,
-    기존 라이브 테이블(source_zip 컬럼 없음)에 맞춰 쓰기 직전에 다시 뺀다."""
+    """harmonize_legacy_schema는 source_zip 컬럼을 요구하므로 태그를 붙여서 만든다.
+    faers_demo/drug/reac에 이제 source_zip 컬럼이 있으므로(add_source_zip_column.py)
+    더 이상 드롭하지 않는다 — 어느 zip에서 왔는지 계속 남겨야 다음에 비슷한 상황에서
+    zip 단위로 정확히 지우고 다시 채울 수 있다."""
     schema = StructType([StructField(c, StringType(), True) for c in header])
     df = spark.createDataFrame(rows, schema)
     df = df.withColumn("source_zip", lit(source_zip_tag))
     df = harmonize_legacy_schema(df, file_type)
-    df = df.drop("source_zip")  # 라이브 테이블 스키마와 정확히 일치시킴 (이번 백필 범위 밖 이슈)
     return df
 
 
@@ -155,7 +166,10 @@ Q4_NAME = "faers_ascii_2013q4.zip"
 print(f"\n{'='*70}\n2013Q4 REAC 백필 시작 ({Q4_NAME}) — 기존 행 삭제 후 재적재\n{'='*70}")
 
 if already_done(Q4_NAME, "REAC"):
-    pass
+    pass  # 이미 완료(9/19) — 아래 실행 안 됨. 참고: 그때 넣은 행은 source_zip=NULL이라
+          # (당시엔 컬럼이 없어서 드롭했음), load_manifest를 지우고 강제로 재실행해도
+          # 이 소스집 기준 DELETE는 그 NULL 행을 못 찾는다. 그 행들을 정리하려면
+          # `WHERE primaryid IN (...) AND source_zip IS NULL`처럼 별도로 지워야 한다.
 else:
     rows, header, rejects = parse_zip_filetype(Q4_ZIP, "REAC")
     print(f"  파싱 완료: 정상 {len(rows):,}행, 격리 {len(rejects):,}행")
@@ -163,16 +177,13 @@ else:
     df = build_harmonized_df(rows, header, "REAC", Q4_NAME)
     table = TABLE["REAC"]
 
-    # 이 zip 소속 primaryid만 골라 기존 부분 적재분을 지운다 (source_zip 컬럼이 없어서
-    # 이번에 새로 파싱한 REAC의 primaryid 집합을 삭제 키로 쓴다 — 지우고 나서 바로
-    # 이 zip 전체를 다시 채우니 두 primaryid 집합은 정확히 동일함)
-    pid_view = df.select("primaryid").distinct()
-    pid_view.createOrReplaceTempView("q4_reac_primaryids")
-
+    # source_zip으로 정확히 이 zip에서 온 행만 지운다 (pipeline_common.delete_partial_rows와
+    # 같은 패턴). primaryid로 지우면 다른 분기에 재등장한 신고서까지 같이 지워질 수 있다 —
+    # 처음 실행 땐 이 컬럼이 없어서 primaryid로 지웠었고, 그게 위 경고에서 설명한 위험이다.
     before_count = spark.table(table).count()
     spark.sql(f"""
         DELETE FROM {table}
-        WHERE primaryid IN (SELECT primaryid FROM q4_reac_primaryids)
+        WHERE source_zip = '{Q4_NAME}'
     """)
     after_delete_count = spark.table(table).count()
     print(f"  🗑️ 삭제: {before_count:,} -> {after_delete_count:,} (제거 {before_count - after_delete_count:,}행)")
