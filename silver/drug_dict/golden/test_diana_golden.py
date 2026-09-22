@@ -1,5 +1,10 @@
 """diana_golden.py 핵심 로직 self-check — 프레임워크 없이 assert만."""
-from diana_golden import filter_manual_curated, split_dev_test, normalize_ingredient
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from build_map import normalize_ingredient
+from diana_golden import filter_manual_curated, split_dev_test
 
 
 def _pairs(*specs):
@@ -35,7 +40,8 @@ def test_split_deterministic():
 
 def test_ingredient_norm():
     assert normalize_ingredient("  carbidopa ") == "CARBIDOPA"
-    assert normalize_ingredient("oxycodone   hydrochloride") == "OXYCODONE HYDROCHLORIDE"
+    assert normalize_ingredient("oxycodone hydrochloride") == "OXYCODONE"   # 염접미사 제거
+    assert normalize_ingredient("oxycodone   hydrochloride") == "OXYCODONE"
 
 
 if __name__ == "__main__":

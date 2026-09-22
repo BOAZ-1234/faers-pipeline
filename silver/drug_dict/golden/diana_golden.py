@@ -10,9 +10,9 @@ DiAna(Fusaroli 2024, PMC10874306)는 FAERS 원본을 독립 수동 검수한 사
     "처음 보는 원본 이름"을 넣었을 때 맞히는지 보는 것이라, 여기서 미리 다듬으면
     Stage 0(normalize)을 건너뛴 채로 채점하게 된다 — 캐스케이드가 제 normalize_query()로
     알아서 다듬어야 공정하다.
-  - ingredient_norm: 정답 성분은 대문자+공백정리만 한다. 채점 시 표기차(carbidopa vs
-    CARBIDOPA)로 오답 처리되는 걸 막기 위한 최소 정규화. 약물명용 normalize_query()는
-    제형 단어를 떼므로 성분명엔 과해서 쓰지 않는다.
+  - ingredient_norm: 사전과 동일한 normalize_ingredient()(build_map.py)로 정규화한다.
+    대문자·공백단일화·염/수화물 접미사 제거(HYDROCHLORIDE 등). 사전이 OXYCODONE으로
+    답을 내는데 정답지가 OXYCODONE HYDROCHLORIDE면 맞혀도 오답 처리되기 때문.
 
 수동 검수분 필터(§DiAna 논문: 보고 ≥200건이 수동 검수 대상, 14,832 term, 96.88% 커버):
   DiAna 공개 CSV엔 검수 플래그가 없어서, FAERS drugname 빈도(coverage.py가 S3에서 뽑는 것)로
@@ -28,26 +28,19 @@ DiAna(Fusaroli 2024, PMC10874306)는 FAERS 원본을 독립 수동 검수한 사
 import argparse
 import csv
 import random
-import urllib.request
+import sys
 from pathlib import Path
 
 HERE = Path(__file__).parent
-DIANA_URL = "https://osf.io/download/n2dgz/"
+sys.path.insert(0, str(HERE.parent))
+from build_map import normalize_ingredient          # 염접미사 제거 포함, 사전과 동일
+from sources.diana import fetch_csv                # 다운로드 로직 중복 제거
+
 OUT_DIR = HERE / "output"
 
 FIELDS = ["raw_drug_name", "ingredient_norm", "unii", "source"]
 MIN_REPORTS_DEFAULT = 200  # DiAna 논문 수동 검수 컷
 TEST_FRACTION = 0.2        # dev/test = 80/20
-
-
-def fetch_csv() -> str:
-    with urllib.request.urlopen(DIANA_URL, timeout=120) as r:
-        return r.read().decode("utf-8-sig")
-
-
-def normalize_ingredient(s: str) -> str:
-    """정답 성분 최소 정규화 — 대문자 + 공백 단일화. 제형은 떼지 않는다(성분명이므로)."""
-    return " ".join(s.upper().split())
 
 
 def extract_pairs(raw_csv_text: str) -> list[dict]:
