@@ -15,7 +15,15 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
-from build_map import SALT_SUFFIXES  # 사전 만들 때 쓴 염/수화물 접미사와 동일 목록
+from build_map import SALT_SUFFIXES, normalize_ingredient  # 사전 만들 때 쓴 것과 동일 로직
+
+# prod_ai(FAERS에서 FDA가 직접 채운 성분 필드)에 성분명이 아니라 분류값이 들어있는 경우.
+# 실측(2026-09-18): 회수 대상 140,638개 중 상위 분류값 7개가 신고 75.6만 건(6.75%)을 차지 —
+# 그대로 받아들이면 "COSMETICS"가 성분처럼 취급되는 등 B단계 집계가 오염된다.
+PROD_AI_EXCLUDE = {
+    "UNSPECIFIED INGREDIENT", "COSMETICS", "VITAMINS", "DEVICE",
+    "DIETARY SUPPLEMENT", "INVESTIGATIONAL PRODUCT", "HERBALS",
+}
 
 # 제형·투여경로·방출형태·약전 표기 등 — 끝에서부터 반복적으로 뗀다
 DOSAGE_FORM_WORDS = {
@@ -80,3 +88,20 @@ def split_backslash_parts(name: str) -> list[str] | None:
         return None
     parts = [p.strip() for p in name.split("\\") if p.strip()]
     return parts if len(parts) > 1 else None
+
+
+def resolve_prod_ai(prod_ai: str | None) -> str | None:
+    """FAERS prod_ai(FDA가 직접 채운 성분 필드)를 1단계 폴백 입력으로 정규화한다.
+    drugname으로 사전 조회가 실패했을 때만 쓴다 — prod_ai는 신뢰 가능한 소스라
+    사전 대조 없이(exact-match 불필요) 정규화만 거쳐 바로 채택한다. 단, prod_ai도
+    "\\"로 복합제를 구분하므로(예: "ABACAVIR SULFATE\\LAMIVUDINE") 그대로 재사용한다.
+    분류값(COSMETICS 등, PROD_AI_EXCLUDE)만 들어있으면 못 찾은 것으로 처리한다.
+
+    반환: §5-1 ingredient_set 형식(정렬·소문자·파이프) 문자열, 못 쓰면 None."""
+    if not prod_ai or not prod_ai.strip():
+        return None
+    parts = split_backslash_parts(prod_ai) or [prod_ai]
+    normed = sorted({normalize_ingredient(p) for p in parts} - PROD_AI_EXCLUDE)
+    if not normed:
+        return None
+    return "|".join(p.lower() for p in normed)
