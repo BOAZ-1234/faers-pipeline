@@ -15,9 +15,13 @@ stdlib만으로는 안 됨(다른 drug_dict 스크립트는 전부 stdlib만 씀
 실행:
   python3 coverage.py                      (S3 전체 스캔이라 수 분 걸림)
   python3 coverage.py --out-freq-csv x.csv  (고유명 빈도 CSV도 같이 저장)
+  python3 coverage.py --out-miss-csv y.csv  (1·1.5단계 미매칭 고유명만 CSV로 저장 — 2단계 입력용)
 
 --out-freq-csv로 저장하는 (name, n_reports) CSV는 golden/diana_golden.py의
 --freq-csv 인자로 그대로 넘길 수 있다(수동 검수분 근사 필터용, 이슈 #29/PR#32).
+
+--out-miss-csv는 사전+prod_ai(1·1.5단계)로도 못 잡은 이름만 신고건수 내림차순으로 저장한다
+(장수연 2단계 입력용).
 """
 import argparse
 import csv
@@ -72,9 +76,20 @@ def write_freq_csv(path: Path, rows: list[tuple[str, int, str | None]]) -> None:
             writer.writerow([name, n])
 
 
+def write_miss_csv(path: Path, miss: list[tuple[str, int]]) -> None:
+    """사전+prod_ai(1·1.5단계)로 못 잡은 (name, n_reports)만 신고건수 내림차순으로 저장 — 2단계 입력용."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["name", "n_reports"])
+        for name, n in miss:
+            writer.writerow([name, n])
+
+
 def main():
     ap = argparse.ArgumentParser(description="C세부1 커버리지 측정")
     ap.add_argument("--out-freq-csv", type=Path, help="고유명 빈도 CSV 저장 경로 (golden/diana_golden.py --freq-csv용)")
+    ap.add_argument("--out-miss-csv", type=Path, help="1·1.5단계 미매칭 고유명 CSV 저장 경로 (2단계 입력용)")
     args = ap.parse_args()
 
     print("FAERS drugname 집계 중 (S3 Iceberg 전체 스캔 — 수 분 걸림)...", flush=True)
@@ -110,6 +125,11 @@ def main():
     print(f"못 잡은 고유명(2·3단계 후보, GPU 산정 입력값): {len(miss):,}개")
 
     miss.sort(key=lambda x: -x[1])
+
+    if args.out_miss_csv:
+        write_miss_csv(args.out_miss_csv, miss)
+        print(f"미매칭 CSV 저장 → {args.out_miss_csv} ({len(miss):,}개)", flush=True)
+
     print("\n못 잡은 것 중 신고 건수 많은 상위 15개:")
     for name, n in miss[:15]:
         print(f"  {n:>8,}  {name}")
