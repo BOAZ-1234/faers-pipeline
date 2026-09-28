@@ -11,7 +11,7 @@ from conftest import load_module
 
 
 def get_bronze_module():
-    return load_module("load_faers_master", "bronze/load_faers_master.py")
+    return load_module("load_faers_master", "bronze/loaders/load_faers_master.py")
 
 
 def test_classify_line_passes_through_well_formed_rows():

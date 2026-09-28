@@ -1,6 +1,10 @@
 # 브론즈 계층(stage_a_raw.faers_drug)의 원본 약물 데이터에서 중복을 제거한 고유 약물명(Unique Drugs)을 추출하고,
 # 이를 실버 계층(stage_b_silver.dict_unique_drugs) 사전에 Iceberg 포맷으로 영구 적재하는 핵심 파이프라인 스크립트입니다.
-from spark_session import build_spark
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "loaders"))
+from spark_session import build_spark  # noqa: E402
 
 # 1. Spark 세션 세팅 (키가 있으면 키, EC2에서는 인스턴스 역할로 자동 인증)
 print("⏳ Spark 세션을 시작합니다...")

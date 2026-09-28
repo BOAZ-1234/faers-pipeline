@@ -10,7 +10,7 @@ from conftest import load_module
 
 
 def get_aers_module():
-    return load_module("load_aers_master", "bronze/load_aers_master.py")
+    return load_module("load_aers_master", "bronze/loaders/load_aers_master.py")
 
 
 def test_classify_line_strips_trailing_terminator_dollar():
