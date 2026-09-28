@@ -20,10 +20,24 @@ from build_map import SALT_SUFFIXES, normalize_ingredient  # 사전 만들 때 �
 # prod_ai(FAERS에서 FDA가 직접 채운 성분 필드)에 성분명이 아니라 분류값이 들어있는 경우.
 # 실측(2026-09-18): 회수 대상 140,638개 중 상위 분류값 7개가 신고 75.6만 건(6.75%)을 차지 —
 # 그대로 받아들이면 "COSMETICS"가 성분처럼 취급되는 등 B단계 집계가 오염된다.
+#
+# PR#30 리뷰("prod_ai도 사전 대조 필요") 대응 실측(2026-09-22): 사전 대조를 추가하면
+# 현재 회수분 134,419개 중 17,946개(13.35%)가 탈락하는데, 그중 대다수(TOZINAMERAN·
+# ETANERCEPT-SZZS 등 백신/바이오시밀러 공식 INN명)는 오타가 아니라 우리 사전이 작아서
+# 못 찾는 정답이었다 — 사전 대조는 채택하지 않고, 진짜 모호한 값(NOS류)만 추가로
+# 걸러내는 쪽으로 결정. "MINERALS"·"VITAMIN B"도 같은 조사에서 발견된 범주값
+# (554개 이름/58,900건, 19개 이름/18,465건)이라 같이 추가.
 PROD_AI_EXCLUDE = {
     "UNSPECIFIED INGREDIENT", "COSMETICS", "VITAMINS", "DEVICE",
     "DIETARY SUPPLEMENT", "INVESTIGATIONAL PRODUCT", "HERBALS",
+    "MINERALS", "VITAMIN B",
 }
+
+# "X NOS"(Not Otherwise Specified, 달리 명시 안 됨) 패턴 — 어떤 성분의 구체적 종류인지
+# 특정하지 않은 값이라 exact-match 목록으로 일일이 나열할 수 없다. 실측: 622개 이름,
+# 신고 199,190건이 여기 해당(INSULIN NOS·PROBIOTICS NOS·COVID-19 VACCINE NOS 등).
+# 단어 경계(\b)를 써서 NOSCAPINE 같은 실제 성분명은 안 걸리게 한다.
+_NOS_PATTERN = re.compile(r"\bNOS\b")
 
 # 제형·투여경로·방출형태·약전 표기 등 — 끝에서부터 반복적으로 뗀다
 DOSAGE_FORM_WORDS = {
@@ -97,11 +111,15 @@ def resolve_prod_ai(prod_ai: str | None) -> str | None:
     "\\"로 복합제를 구분하므로(예: "ABACAVIR SULFATE\\LAMIVUDINE") 그대로 재사용한다.
     분류값(COSMETICS 등, PROD_AI_EXCLUDE)만 들어있으면 못 찾은 것으로 처리한다.
 
+    복합제("\\" 구분)는 부품마다 따로 걸러서, NOS/분류값인 부품만 빼고 나머지는 살린다
+    (예: "AMINO ACIDS\\ELECTROLYTES NOS\\SOYBEAN OIL" → "electrolytes nos"만 제외).
+
     반환: §5-1 ingredient_set 형식(정렬·소문자·파이프) 문자열, 못 쓰면 None."""
     if not prod_ai or not prod_ai.strip():
         return None
     parts = split_backslash_parts(prod_ai) or [prod_ai]
-    normed = sorted({normalize_ingredient(p) for p in parts} - PROD_AI_EXCLUDE)
+    normed = {normalize_ingredient(p) for p in parts} - PROD_AI_EXCLUDE
+    normed = sorted(v for v in normed if not _NOS_PATTERN.search(v))
     if not normed:
         return None
     return "|".join(p.lower() for p in normed)
