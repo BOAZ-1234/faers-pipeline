@@ -48,6 +48,8 @@ def synthetic_map(tmp_path):
             # 한 제품이 성분 여럿(복합제) → ambiguous 보류 검증용
             ("COMBOCARE", "DRUGA", "druga|drugb", "", "test", "사전", "", "d-test"),
             ("COMBOCARE", "DRUGB", "druga|drugb", "", "test", "사전", "", "d-test"),
+            # 정규화로 염이 떨어져 남는 조각 stub → 불량 stub 거부 검증용
+            ("DIMETHYL", "DIMETHYL", "dimethyl", "", "test", "사전", "", "d-test"),
         ],
     )
     return path
@@ -150,6 +152,11 @@ def test_variant_designator_mismatch_fn():
     assert f("VITAMIN B6", "VITAMIN B6") is False      # 같은 번호 → OK
     assert f("PARAGARD 380A", "PARAGARD T 380A") is False  # 380A는 숫자+문자라 미해당
     assert f("TRIAMCINOLON", "TRIAMCINOLONE") is False     # 숫자 없음 → 제약 없음
+    # 로마숫자 응고인자 — 번호가 곧 다른 약
+    assert f("FACTOR I", "FACTOR IX") is True          # 1인자 → 9인자 오변형
+    assert f("FACTOR II", "FACTOR VII") is True         # 2인자 → 7인자 오변형
+    assert f("FACTOR VIII", "FACTOR VIII") is False     # 같은 번호 → OK
+    assert f("ASPIRIN 20MG", "ASPIRIN 81") is False     # 단독 숫자(용량)는 지정자 아님 → OK
 
 
 def test_vitamin_number_mismatch_rejected(synthetic_map, tmp_path):
@@ -170,6 +177,13 @@ def test_ambiguous_combo_held_by_default(synthetic_map, tmp_path):
     kept = _match_map(synthetic_map, tmp_path, [("COMBOCAR", 100)],
                       threshold=88.0, keep_ambiguous=True)
     assert kept["COMBOCAR"]["ambiguous"] == "1"   # 명시하면 채택(대표성분)
+
+
+def test_degenerate_stub_rejected(synthetic_map, tmp_path):
+    """정규화가 염(FUMARATE)을 떼어 남은 'DIMETHYL' 조각은 사전 stub에 붙어도 기각한다.
+    ('DIMETHYL FUMARATE'는 normalize에서 FUMARATE가 떨어져 'DIMETHYL'이 됨.)"""
+    res = _match_map(synthetic_map, tmp_path, [("DIMETHYL FUMARATE", 100)], threshold=88.0)
+    assert "DIMETHYL FUMARATE" not in res
 
 
 def test_output_carries_dictionary_version(synthetic_map, tmp_path):

@@ -157,20 +157,30 @@ def _alnum(s: str) -> str:
     return "".join(ch for ch in s if ch.isalnum()).upper()
 
 
-# 비타민류 '문자+숫자' 변형 지정자: B6, B12, D3, K2 …
-_VITAMIN_DESIG = re.compile(r"\b[A-Z]\d+\b")
+# 변형 지정자: 문자+숫자(B6·B12·D3), 그리고 로마숫자(II·VII·IX…).
+# 로마숫자는 응고인자(FACTOR I/II/VII/IX)처럼 번호가 곧 다른 약을 뜻하는 경우가 있어,
+# 후보 번호가 원본에 없으면 다른 약으로 본다. 단독 I·V·X는 오탐이 커서 제외(2글자 이상만).
+_DESIG = re.compile(r"\b(?:[A-Z]\d+|VIII|VII|XIII|XII|III|II|IV|IX|VI|XI)\b")
 
 
 def variant_designator_mismatch(raw: str, cand: str) -> bool:
-    """후보에 든 비타민류 지정자(B6·B12·D3…)가 원본 이름에 없으면 True(=오변형).
+    """후보에 든 번호 지정자(B6·B12·D3·FACTOR IX…)가 원본 이름에 없으면 True(=오변형).
 
     normalize_query가 용량으로 오인해 뒤 숫자를 떼면('VITAMIN B 12'→'VITAMIN B')
-    포괄명 'VITAMIN B'가 사전의 특정 'VITAMIN B6'에 붙어 B12를 B6로 뭉갠다. 정규화가
-    숫자를 떼기 전 원본(raw)을 봐서, 후보의 번호가 원본에 없으면 서로 다른 비타민으로
-    보고 채택을 막는다. (예: raw 'VITAMIN B-12' vs 후보 'VITAMIN B6' → B6가 원본에
-    없음 → 기각. 'PARAGARD 380A'의 '380A'는 숫자+문자라 이 패턴에 안 걸려 오작동 없음.)"""
+    포괄명 'VITAMIN B'가 사전의 특정 'VITAMIN B6'에 붙어 B12를 B6로 뭉갠다. 응고인자도
+    'FACTOR I'가 'FACTOR IX'에 붙는 식(감사에서 확인). 정규화가 숫자를 떼기 전 원본(raw)을
+    봐서, 후보의 번호가 원본에 없으면 서로 다른 약으로 보고 채택을 막는다.
+    ('PARAGARD 380A'의 '380A'는 숫자+문자라 이 패턴에 안 걸려 오작동 없음. 단독 숫자
+    용량(20MG 등)은 지정자로 안 보므로 브랜드→성분 매칭을 방해하지 않는다.)"""
     rawc = _alnum(raw)
-    return any(tok not in rawc for tok in set(_VITAMIN_DESIG.findall(cand.upper())))
+    return any(tok not in rawc for tok in set(_DESIG.findall(cand.upper())))
+
+
+# 정규화가 활성성분의 일부(염·수식어)를 떼어내 남은 '조각'이 사전에 stub으로 존재하는 경우,
+# 그 조각은 실제 약이 아니므로 채택하지 않는다. 예: DIMETHYL FUMARATE에서 SALT_SUFFIXES의
+# FUMARATE가 떨어져 'DIMETHYL'이 되고 사전의 stub 'DIMETHYL'에 붙는다(감사에서 확인).
+# 새 사례가 나오면 여기에 추가(근본 해결은 사전 정제/normalize 예외).
+DEGENERATE_TARGETS = {"DIMETHYL"}
 
 
 def run_match(miss_path, out_path, map_path, scorer_name, threshold, limit, margin,
@@ -183,7 +193,7 @@ def run_match(miss_path, out_path, map_path, scorer_name, threshold, limit, marg
           f", ambiguous(복합제)={'채택' if keep_ambiguous else '보류→3단계'}", flush=True)
 
     n_matched = n_ambiguous = n_low_margin = n_short_reject = 0
-    n_variant_reject = n_ambiguous_held = 0
+    n_variant_reject = n_ambiguous_held = n_degenerate = 0
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=OUT_FIELDS)
         w.writeheader()
@@ -213,6 +223,10 @@ def run_match(miss_path, out_path, map_path, scorer_name, threshold, limit, marg
                 n_variant_reject += 1
                 continue
             rec, ambiguous = cands.canonical(best)
+            # 정규화로 성분 조각만 남아 사전 stub에 붙은 것(DIMETHYL 등)은 실제 약이 아니라 기각.
+            if rec["ingredient_norm"].strip().upper() in DEGENERATE_TARGETS:
+                n_degenerate += 1
+                continue
             # 후보가 복합제라 성분이 여럿(ambiguous)이면 단일 성분으로 우기지 않고
             # 보류→3단계(precision 우선). --keep-ambiguous면 종전대로 대표성분 채택.
             if ambiguous and not keep_ambiguous:
@@ -236,7 +250,8 @@ def run_match(miss_path, out_path, map_path, scorer_name, threshold, limit, marg
             })
     print(f"채택 {n_matched:,}개 (scorer={scorer_name}, ambiguous {n_ambiguous:,}개)", flush=True)
     print(f"  보류/기각 → 마진<{margin}: {n_low_margin:,} / 짧은이름: {n_short_reject:,} / "
-          f"비타민변형불일치: {n_variant_reject:,} / 복합제(ambiguous): {n_ambiguous_held:,}", flush=True)
+          f"번호변형불일치: {n_variant_reject:,} / 복합제(ambiguous): {n_ambiguous_held:,} / "
+          f"불량stub: {n_degenerate:,}", flush=True)
     print(f"→ {out_path}", flush=True)
 
 
