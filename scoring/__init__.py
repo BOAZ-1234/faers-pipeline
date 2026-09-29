@@ -9,18 +9,20 @@
   keys.SignalKey, keys.make_key, keys.canonical
   scorer.score, scorer.Scorecard
   metrics.recall_at_k, metrics.lift_at_k, metrics.review_reduction
-  ground_truth.build_labelset, ground_truth.choose_cutoff_year
+  ground_truth.build_labelset, ground_truth.choose_cutoff_year, ground_truth.load_gold
   random_ranking.random_ranking  (스모크용 가짜 순위표)
 """
 
 from scoring.keys import SignalKey, make_key, canonical
 from scoring.scorer import score, Scorecard
 from scoring import metrics, ground_truth, random_ranking
+from scoring.ground_truth import load_gold
 
 __all__ = [
     "SignalKey", "make_key", "canonical",
     "score", "Scorecard",
     "metrics", "ground_truth", "random_ranking",
+    "load_gold",
 ]
 
 # 기본 K값 — 계획서 4-2 (검토대상 축소 관점)

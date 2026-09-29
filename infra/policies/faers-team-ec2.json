@@ -1,0 +1,23 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Effect": "Allow",
+     "Action": ["ec2:StartInstances", "ec2:StopInstances"],
+     "Resource": "arn:aws:ec2:ap-northeast-2:825494477740:instance/i-09ea3552c292bd78c"},
+    {"Effect": "Allow",
+     "Action": "ssm:StartSession",
+     "Resource": [
+       "arn:aws:ec2:ap-northeast-2:825494477740:instance/i-09ea3552c292bd78c",
+       "arn:aws:ssm:ap-northeast-2:825494477740:document/SSM-SessionManagerRunShell",
+       "arn:aws:ssm:ap-northeast-2::document/SSM-SessionManagerRunShell"]},
+    {"Effect": "Allow",
+     "Action": ["ssm:TerminateSession", "ssm:ResumeSession"],
+     "Resource": "arn:aws:ssm:*:*:session/${aws:username}-*"},
+    {"Effect": "Allow",
+     "Action": ["ec2:DescribeInstances", "ec2:DescribeInstanceStatus", "ec2:DescribeVolumes",
+                "cloudwatch:DescribeAlarms",
+                "ssm:DescribeInstanceInformation", "ssm:DescribeInstanceProperties",
+                "ssm:GetConnectionStatus", "ssm:DescribeSessions"],
+     "Resource": "*"}
+  ]
+}

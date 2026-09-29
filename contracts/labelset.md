@@ -5,12 +5,17 @@ FDA 분기 신호보고서에서 만든 **정답지**. 채점기의 정답 기�
 ## 원본 → 라벨셋 흐름
 
 ```
-FDA 분기 신호보고서 스크랩
-  → classify_signals (하경 0단계): info 텍스트 → label ∈ {양성, 음성, 보류}
-  → scoring.ground_truth.build_labelset: 쌍 종결 + 코호트 컷오프 분할
+FDA 분기 신호보고서 스크랩 (download_fda_signals → out/fda_signals.csv, gitignore)
+  → 사람+LLM 전수 감사로 label 정정
+  → labelset/data/labelset_gold.csv  (감사본 정답지, git 추적 · 재생성 불가)
+  → scoring.ground_truth.load_gold → build_labelset: 쌍 종결 + 코호트 컷오프 분할
 ```
 
-## 입력 표 (build_labelset 의 DataFrame)
+> **`label` ≠ `label3`.** `label` 은 감사본(사람+LLM 정정)으로 **채점의 정답**이다.
+> `classify_signals` 가 만드는 `label3` 는 그 감사본 대비 정확도를 재는 **자동분류 참고값**이며
+> **채점에 쓰지 않는다.** gold 에는 `label3` 을 넣지 않는다.
+
+## 입력 표 (build_labelset 의 DataFrame = `load_gold()` 가 읽는 gold)
 
 | 컬럼 | 설명 |
 |---|---|
@@ -18,7 +23,11 @@ FDA 분기 신호보고서 스크랩
 | `signal` | 부작용 표기 원문 |
 | `year`, `q_start` | 최초/각 등장 분기 (컷오프 근거) |
 | `quarter_label` | 분기 라벨 문자열 (등장 분기 수 집계용) |
-| `label` | 3분류 `{양성, 음성, 보류}` — 하경 산출 |
+| `label` | 3분류 `{양성, 음성, 보류}` — **감사본**(사람+LLM 정정). `classify_signals` 의 `label3`(자동분류)이 아님 |
+| `label_basis` | 그 label 을 정한 근거 (감사 기록, 리뷰용) |
+
+> gold 는 스크랩 원문(`info_full`·`info`·`source_url` 등)을 뺀 authored 컬럼만 담는다 —
+> 그 원문들은 재생성 가능한 데이터라 git 밖(`out/`) 유지.
 
 ## 라벨 의미
 
