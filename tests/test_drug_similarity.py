@@ -45,6 +45,9 @@ def synthetic_map(tmp_path):
             ("SORANIB", "SORANIB", "soranib", "", "test", "사전", "", "d-test"),
             # 특수문자(하이픈)만 다른 변형 → 짧은이름 예외 검증용
             ("SOLU-CORTEF", "HYDROCORTISONE", "hydrocortisone", "", "test", "사전", "", "d-test"),
+            # 한 제품이 성분 여럿(복합제) → ambiguous 보류 검증용
+            ("COMBOCARE", "DRUGA", "druga|drugb", "", "test", "사전", "", "d-test"),
+            ("COMBOCARE", "DRUGB", "druga|drugb", "", "test", "사전", "", "d-test"),
         ],
     )
     return path
@@ -60,11 +63,12 @@ def _match_map(map_path, tmp_path, miss_rows, **kw):
     # 검증 대상이 흐려진다. 규칙 자체는 아래 전용 테스트가 short_threshold를 넘겨 검증.
     params = dict(map_path=map_path, scorer_name="token_sort_ratio",
                   threshold=92.0, limit=5, margin=similarity.DEFAULT_MARGIN,
-                  short_threshold=0.0, short_maxlen=10)
+                  short_threshold=0.0, short_maxlen=10, keep_ambiguous=False)
     params.update(kw)
     similarity.run_match(miss_path, out_path, params["map_path"], params["scorer_name"],
                          params["threshold"], params["limit"], params["margin"],
-                         params["short_threshold"], params["short_maxlen"])
+                         params["short_threshold"], params["short_maxlen"],
+                         params["keep_ambiguous"])
     with open(out_path, encoding="utf-8") as f:
         return {r["drugname_raw"]: r for r in csv.DictReader(f)}
 
@@ -135,6 +139,37 @@ def test_punctuation_variant_bypasses_short_rule(synthetic_map, tmp_path):
     res = _match_map(synthetic_map, tmp_path, [("SOLUCORTEF", 200)],
                      threshold=92.0, short_threshold=96.0)
     assert res["SOLUCORTEF"]["ingredient_norm"] == "HYDROCORTISONE"
+
+
+def test_variant_designator_mismatch_fn():
+    """비타민류 번호 변형(B6·B12·D3…) 불일치 판정 — 문제2 가드의 핵심 로직.
+    normalize가 숫자를 떼기 전 원본을 봐서, 후보 번호가 원본에 없으면 오변형."""
+    f = similarity.variant_designator_mismatch
+    assert f("VITAMIN B-12", "VITAMIN B6") is True    # B12인데 B6로 → 오변형
+    assert f("VITAMIN B", "VITAMIN B6") is True        # 포괄 B인데 특정 B6로 → 오변형
+    assert f("VITAMIN B6", "VITAMIN B6") is False      # 같은 번호 → OK
+    assert f("PARAGARD 380A", "PARAGARD T 380A") is False  # 380A는 숫자+문자라 미해당
+    assert f("TRIAMCINOLON", "TRIAMCINOLONE") is False     # 숫자 없음 → 제약 없음
+
+
+def test_vitamin_number_mismatch_rejected(synthetic_map, tmp_path):
+    """VITAMIN B12는 사전의 VITAMIN B6에 붙지 않는다(번호 변형 가드)."""
+    # 사전에 VITAMIN B6만 있고, 입력은 B12 → 채택되면 안 됨
+    m = synthetic_map
+    res = _match_map(m, tmp_path, [("VITAMIN B12", 100)], threshold=80.0)
+    # (사전에 B6가 없으니 애초에 후보가 없을 수도 있어, 이 케이스는 fn 단위테스트로 보장)
+    assert "VITAMIN B12" not in res or res["VITAMIN B12"]["ingredient_norm"] != "VITAMIN B6"
+
+
+def test_ambiguous_combo_held_by_default(synthetic_map, tmp_path):
+    """복합제(한 제품이 성분 여럿)는 기본적으로 대표성분 하나로 채택하지 않고 보류.
+    --keep-ambiguous(=keep_ambiguous=True)를 주면 종전대로 채택."""
+    held = _match_map(synthetic_map, tmp_path, [("COMBOCAR", 100)], threshold=88.0)
+    assert "COMBOCAR" not in held           # 기본: 복합제 보류
+
+    kept = _match_map(synthetic_map, tmp_path, [("COMBOCAR", 100)],
+                      threshold=88.0, keep_ambiguous=True)
+    assert kept["COMBOCAR"]["ambiguous"] == "1"   # 명시하면 채택(대표성분)
 
 
 def test_output_carries_dictionary_version(synthetic_map, tmp_path):

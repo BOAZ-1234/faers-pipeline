@@ -29,6 +29,7 @@ C세부1 — 2단계 글자 유사도 매칭 (§4-2 [2단계])
 """
 import argparse
 import csv
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -156,15 +157,33 @@ def _alnum(s: str) -> str:
     return "".join(ch for ch in s if ch.isalnum()).upper()
 
 
+# 비타민류 '문자+숫자' 변형 지정자: B6, B12, D3, K2 …
+_VITAMIN_DESIG = re.compile(r"\b[A-Z]\d+\b")
+
+
+def variant_designator_mismatch(raw: str, cand: str) -> bool:
+    """후보에 든 비타민류 지정자(B6·B12·D3…)가 원본 이름에 없으면 True(=오변형).
+
+    normalize_query가 용량으로 오인해 뒤 숫자를 떼면('VITAMIN B 12'→'VITAMIN B')
+    포괄명 'VITAMIN B'가 사전의 특정 'VITAMIN B6'에 붙어 B12를 B6로 뭉갠다. 정규화가
+    숫자를 떼기 전 원본(raw)을 봐서, 후보의 번호가 원본에 없으면 서로 다른 비타민으로
+    보고 채택을 막는다. (예: raw 'VITAMIN B-12' vs 후보 'VITAMIN B6' → B6가 원본에
+    없음 → 기각. 'PARAGARD 380A'의 '380A'는 숫자+문자라 이 패턴에 안 걸려 오작동 없음.)"""
+    rawc = _alnum(raw)
+    return any(tok not in rawc for tok in set(_VITAMIN_DESIG.findall(cand.upper())))
+
+
 def run_match(miss_path, out_path, map_path, scorer_name, threshold, limit, margin,
-              short_threshold=96.0, short_maxlen=10):
+              short_threshold=96.0, short_maxlen=10, keep_ambiguous=False):
     scorer = SCORERS[scorer_name]
     cands = load_candidates(map_path)
     miss = load_miss(miss_path)
     print(f"후보: {len(cands.records):,}개 (버킷 {len(cands.buckets)}개) / miss: {len(miss):,}개", flush=True)
-    print(f"임계값: 기본 {threshold}, 짧은이름(<={short_maxlen}자·단일토큰) {short_threshold}", flush=True)
+    print(f"임계값: 기본 {threshold}, 짧은이름(<={short_maxlen}자·단일토큰) {short_threshold}"
+          f", ambiguous(복합제)={'채택' if keep_ambiguous else '보류→3단계'}", flush=True)
 
     n_matched = n_ambiguous = n_low_margin = n_short_reject = 0
+    n_variant_reject = n_ambiguous_held = 0
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=OUT_FIELDS)
         w.writeheader()
@@ -188,7 +207,17 @@ def run_match(miss_path, out_path, map_path, scorer_name, threshold, limit, marg
             if score - second < margin:      # 1·2등 초박빙 → 애매, 채택 보류(3단계로)
                 n_low_margin += 1
                 continue
+            # 비타민류 번호 변형 불일치(VITAMIN B-12 → VITAMIN B6 등)면 기각 → 3단계로.
+            # normalize가 숫자를 떼기 전 원본(name)으로 판단한다.
+            if variant_designator_mismatch(name, best):
+                n_variant_reject += 1
+                continue
             rec, ambiguous = cands.canonical(best)
+            # 후보가 복합제라 성분이 여럿(ambiguous)이면 단일 성분으로 우기지 않고
+            # 보류→3단계(precision 우선). --keep-ambiguous면 종전대로 대표성분 채택.
+            if ambiguous and not keep_ambiguous:
+                n_ambiguous_held += 1
+                continue
             if ambiguous:
                 n_ambiguous += 1
             n_matched += 1
@@ -205,8 +234,9 @@ def run_match(miss_path, out_path, map_path, scorer_name, threshold, limit, marg
                 "confidence": round(score / 100, 4),
                 "dictionary_version": rec["dictionary_version"],
             })
-    print(f"채택 {n_matched:,}개 (scorer={scorer_name}, ambiguous {n_ambiguous:,}개) / "
-          f"마진<{margin} 보류 {n_low_margin:,}개 / 짧은이름 규칙으로 탈락 {n_short_reject:,}개", flush=True)
+    print(f"채택 {n_matched:,}개 (scorer={scorer_name}, ambiguous {n_ambiguous:,}개)", flush=True)
+    print(f"  보류/기각 → 마진<{margin}: {n_low_margin:,} / 짧은이름: {n_short_reject:,} / "
+          f"비타민변형불일치: {n_variant_reject:,} / 복합제(ambiguous): {n_ambiguous_held:,}", flush=True)
     print(f"→ {out_path}", flush=True)
 
 
@@ -286,6 +316,8 @@ def build_parser():
                    help="이 길이 이하 & 단일토큰이면 짧은 이름으로 보고 --short-threshold 적용")
     m.add_argument("--limit", type=int, default=5, help="블로킹 후 채점 상위 후보 수")
     m.add_argument("--margin", type=float, default=DEFAULT_MARGIN, help="1·2등 점수 차 하한(미만이면 보류)")
+    m.add_argument("--keep-ambiguous", action="store_true",
+                   help="복합제(성분 여럿) 매칭을 대표성분 하나로 채택(기본: 보류→3단계)")
 
     s = sub.add_parser("sweep", help="(임계값 → 채택 수/precision) 곡선")
     s.add_argument("miss", type=Path)
@@ -302,7 +334,7 @@ def main():
     if args.cmd == "match":
         run_match(args.miss, args.out, args.map, args.scorer,
                   args.threshold, args.limit, args.margin,
-                  args.short_threshold, args.short_maxlen)
+                  args.short_threshold, args.short_maxlen, args.keep_ambiguous)
     elif args.cmd == "sweep":
         run_sweep(args.miss, args.out, args.map, args.scorer, args.limit, args.gold)
 
