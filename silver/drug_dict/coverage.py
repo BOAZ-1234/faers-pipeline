@@ -12,9 +12,13 @@ stdlib만으로는 안 됨(다른 drug_dict 스크립트는 전부 stdlib만 씀
   aws configure  (S3 읽기 권한 있는 IAM 키)
 
 실행:
-  python3 coverage.py   (S3 전체 스캔이라 수 분 걸림)
+  python3 coverage.py                         (커버리지만)
+  python3 coverage.py --out-freq-csv foo.csv  (빈도 CSV도 함께 저장 — diana_golden.py --freq-csv 용)
 """
+import argparse
+import csv
 import duckdb
+from pathlib import Path
 
 from match import load_dictionary, lookup
 
@@ -32,6 +36,7 @@ def fetch_drugname_counts() -> list[tuple[str, int]]:
     con = duckdb.connect()
     con.execute("INSTALL iceberg; LOAD iceberg; INSTALL httpfs; LOAD httpfs;")
     con.execute("CREATE SECRET (TYPE s3, PROVIDER credential_chain, REGION 'ap-northeast-2');")
+    con.execute("SET unsafe_enable_version_guessing = true;")
     return con.execute(f"""
         SELECT upper(trim(drugname)) AS name, count(*) AS n_reports
         FROM iceberg_scan('{FAERS_DRUG_TABLE}')
@@ -41,9 +46,21 @@ def fetch_drugname_counts() -> list[tuple[str, int]]:
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--out-freq-csv", metavar="PATH", help="빈도 CSV 저장 경로 (diana_golden.py --freq-csv 용)")
+    args = parser.parse_args()
+
     print("FAERS drugname 집계 중 (S3 Iceberg 전체 스캔 — 수 분 걸림)...", flush=True)
     rows = fetch_drugname_counts()
     print(f"고유 약물명: {len(rows):,}개", flush=True)
+
+    if args.out_freq_csv:
+        out = Path(args.out_freq_csv)
+        with open(out, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["name", "n_reports"])
+            w.writerows(rows)
+        print(f"빈도 CSV 저장 완료: {out}", flush=True)
 
     products, ingredients, known_combos = load_dictionary()
     print(f"사전: 브랜드 {len(products):,}개, 성분 {len(ingredients):,}개", flush=True)
