@@ -16,7 +16,7 @@ C세부1 — 2단계 글자 유사도 매칭 (§4-2 [2단계])
   잰다(전량 O(N·M) 회피). 첫 글자 오타는 이 방식이 놓치지만, precision 우선이라
   감수한다(그런 건 3단계로).
 
-입력  : coverage.py --dump-miss 가 뽑은 miss CSV (name, n_reports)
+입력  : 1단계+1.5(prod_ai 폴백) 파이프라인이 뽑은 miss CSV (name, n_reports)
 사전  : build_map.py 가 만든 drug_ingredient_map.csv (gitignore, 별도 생성 필요)
 출력  : 매칭 결과 CSV (아래 OUT_FIELDS) — method="유사도", confidence=유사도 점수
 
@@ -24,7 +24,6 @@ C세부1 — 2단계 글자 유사도 매칭 (§4-2 [2단계])
         유사도 스코어러는 C++ 구현이 필요해 예외로 둔다(coverage.py의 duckdb와 같은 예외).
 
 실행 예:
-  python3 coverage.py --dump-miss miss.csv          # 1단계 실패분 뽑기(S3 필요)
   python3 similarity.py match miss.csv -o matched.csv --threshold 92
   python3 similarity.py sweep miss.csv -o curve.csv  # (후보수·임계값) 곡선
 """
@@ -145,19 +144,46 @@ def match_one(name: str, cands: Candidates, scorer, limit: int):
     return q, best_cand, float(best_score), float(second_score)
 
 
-def run_match(miss_path, out_path, map_path, scorer_name, threshold, limit, margin):
+def is_short_name(q: str, short_maxlen: int) -> bool:
+    """짧은 단일토큰 이름인가 — 이런 이름은 한두 글자 차이로도 유사도가 높게 나와
+    ("INSULIN"↔"INULIN"=92.3, 한 글자 차) 오매칭 위험이 크다. 그래서 더 높은
+    임계값을 요구한다. 공백이 있으면(=여러 토큰) 정보량이 충분하다고 보고 제외."""
+    return len(q) <= short_maxlen and " " not in q
+
+
+def _alnum(s: str) -> str:
+    """영숫자만 남기고 대문자화 — 특수문자/공백만 다른지 비교용."""
+    return "".join(ch for ch in s if ch.isalnum()).upper()
+
+
+def run_match(miss_path, out_path, map_path, scorer_name, threshold, limit, margin,
+              short_threshold=96.0, short_maxlen=10):
     scorer = SCORERS[scorer_name]
     cands = load_candidates(map_path)
     miss = load_miss(miss_path)
     print(f"후보: {len(cands.records):,}개 (버킷 {len(cands.buckets)}개) / miss: {len(miss):,}개", flush=True)
+    print(f"임계값: 기본 {threshold}, 짧은이름(<={short_maxlen}자·단일토큰) {short_threshold}", flush=True)
 
-    n_matched = n_ambiguous = n_low_margin = 0
+    n_matched = n_ambiguous = n_low_margin = n_short_reject = 0
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=OUT_FIELDS)
         w.writeheader()
         for name, n in miss:
             q, best, score, second = match_one(name, cands, scorer, limit)
-            if best is None or score < threshold:
+            if best is None:
+                continue
+            # 특수문자·공백만 다르고 글자가 완전히 같으면(SOLU-MEDROL=SOLUMEDROL,
+            # PRO-AIR=PROAIR) 오매칭일 수 없으니 짧은이름 규칙을 면제하고 기본 임계값만 본다.
+            punct_variant = _alnum(q) == _alnum(best)
+            # 짧은 단일토큰이면(단 위 예외 아니면) 더 높은 임계값을 적용(오매칭 방지)
+            if is_short_name(q, short_maxlen) and not punct_variant:
+                eff_threshold = short_threshold
+            else:
+                eff_threshold = threshold
+            if score < eff_threshold:
+                # 기본 임계값은 넘었는데 짧은이름 규칙에서 걸린 경우만 따로 센다
+                if score >= threshold and eff_threshold > threshold:
+                    n_short_reject += 1
                 continue
             if score - second < margin:      # 1·2등 초박빙 → 애매, 채택 보류(3단계로)
                 n_low_margin += 1
@@ -179,8 +205,8 @@ def run_match(miss_path, out_path, map_path, scorer_name, threshold, limit, marg
                 "confidence": round(score / 100, 4),
                 "dictionary_version": rec["dictionary_version"],
             })
-    print(f"채택 {n_matched:,}개 (임계값 {threshold}, scorer={scorer_name}, "
-          f"ambiguous {n_ambiguous:,}개) / 마진<{margin} 보류 {n_low_margin:,}개", flush=True)
+    print(f"채택 {n_matched:,}개 (scorer={scorer_name}, ambiguous {n_ambiguous:,}개) / "
+          f"마진<{margin} 보류 {n_low_margin:,}개 / 짧은이름 규칙으로 탈락 {n_short_reject:,}개", flush=True)
     print(f"→ {out_path}", flush=True)
 
 
@@ -192,7 +218,7 @@ def run_sweep(miss_path, out_path, map_path, scorer_name, limit, gold_path):
     miss = load_miss(miss_path)
     gold = load_gold(gold_path) if gold_path else None
     print(f"스윕: miss {len(miss):,}개, scorer={scorer_name}"
-          + (f", gold {len(gold):,}개" if gold else " (gold 없음 — precision 생략)"), flush=True)
+          + (f", gold {len(gold):,}개" if gold else " (gold 없음, precision 생략)"), flush=True)
 
     # 한 번만 채점해두고 임계값만 바꿔가며 집계
     scored = []  # (name, n, best_cand, score)
@@ -254,6 +280,10 @@ def build_parser():
     m.add_argument("--map", type=Path, default=DEFAULT_MAP)
     m.add_argument("--scorer", choices=SCORERS, default="token_sort_ratio")
     m.add_argument("--threshold", type=float, default=92.0, help="채택 최소 점수(precision 우선)")
+    m.add_argument("--short-threshold", type=float, default=96.0,
+                   help="짧은 단일토큰 이름의 최소 점수(오매칭 방지 — INSULIN↔INULIN류)")
+    m.add_argument("--short-maxlen", type=int, default=10,
+                   help="이 길이 이하 & 단일토큰이면 짧은 이름으로 보고 --short-threshold 적용")
     m.add_argument("--limit", type=int, default=5, help="블로킹 후 채점 상위 후보 수")
     m.add_argument("--margin", type=float, default=DEFAULT_MARGIN, help="1·2등 점수 차 하한(미만이면 보류)")
 
@@ -271,7 +301,8 @@ def main():
     args = build_parser().parse_args()
     if args.cmd == "match":
         run_match(args.miss, args.out, args.map, args.scorer,
-                  args.threshold, args.limit, args.margin)
+                  args.threshold, args.limit, args.margin,
+                  args.short_threshold, args.short_maxlen)
     elif args.cmd == "sweep":
         run_sweep(args.miss, args.out, args.map, args.scorer, args.limit, args.gold)
 

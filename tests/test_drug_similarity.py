@@ -43,6 +43,8 @@ def synthetic_map(tmp_path):
             # 서로 매우 닮은 두 이름 → 애매성(마진) 검증용
             ("SORAFENIB", "SORAFENIB", "sorafenib", "", "test", "사전", "", "d-test"),
             ("SORANIB", "SORANIB", "soranib", "", "test", "사전", "", "d-test"),
+            # 특수문자(하이픈)만 다른 변형 → 짧은이름 예외 검증용
+            ("SOLU-CORTEF", "HYDROCORTISONE", "hydrocortisone", "", "test", "사전", "", "d-test"),
         ],
     )
     return path
@@ -53,11 +55,16 @@ def _match_map(map_path, tmp_path, miss_rows, **kw):
     miss_path = tmp_path / "miss.csv"
     _write_csv(miss_path, ["name", "n_reports"], miss_rows)
     out_path = tmp_path / "out.csv"
+    # short_threshold 기본을 0으로 둬 짧은이름 규칙을 꺼둔다 — 이 헬퍼를 쓰는 기존
+    # 테스트들은 오타/용량/마진 로직을 짧은 합성명으로 검증하는 것이라, 규칙이 켜지면
+    # 검증 대상이 흐려진다. 규칙 자체는 아래 전용 테스트가 short_threshold를 넘겨 검증.
     params = dict(map_path=map_path, scorer_name="token_sort_ratio",
-                  threshold=92.0, limit=5, margin=similarity.DEFAULT_MARGIN)
+                  threshold=92.0, limit=5, margin=similarity.DEFAULT_MARGIN,
+                  short_threshold=0.0, short_maxlen=10)
     params.update(kw)
     similarity.run_match(miss_path, out_path, params["map_path"], params["scorer_name"],
-                         params["threshold"], params["limit"], params["margin"])
+                         params["threshold"], params["limit"], params["margin"],
+                         params["short_threshold"], params["short_maxlen"])
     with open(out_path, encoding="utf-8") as f:
         return {r["drugname_raw"]: r for r in csv.DictReader(f)}
 
@@ -104,6 +111,30 @@ def test_ambiguous_pair_held_by_margin(synthetic_map, tmp_path):
     res2 = _match_map(synthetic_map, tmp_path, [("SORAFNIB", 20)],
                       threshold=88.0, margin=0.0)
     assert "SORAFNIB" in res2
+
+
+def test_short_name_needs_higher_threshold(synthetic_map, tmp_path):
+    """짧은 단일토큰 이름은 --short-threshold를 넘어야 채택된다.
+    'ASPRIN'↔'ASPIRIN'은 한 글자 차라 점수가 ~92 — 긴 이름이면 채택될 점수지만,
+    짧은 이름에선 오매칭('INSULIN'↔'INULIN'류) 위험이 커서 벽을 높인다.
+    (short_threshold=96이면 걸러지고, 규칙을 풀면=88 채택되어야 함 → 탈락 원인이
+    바로 짧은이름 규칙임을 확인.)"""
+    blocked = _match_map(synthetic_map, tmp_path, [("ASPRIN", 500)],
+                         threshold=88.0, short_threshold=96.0)
+    assert "ASPRIN" not in blocked
+
+    allowed = _match_map(synthetic_map, tmp_path, [("ASPRIN", 500)],
+                         threshold=88.0, short_threshold=88.0)
+    assert allowed["ASPRIN"]["ingredient_norm"] == "ASPIRIN"
+
+
+def test_punctuation_variant_bypasses_short_rule(synthetic_map, tmp_path):
+    """짧은 단일토큰이라도 특수문자(하이픈·물음표 등)만 다르고 글자가 완전히 같으면
+    ('SOLUCORTEF'↔'SOLU-CORTEF') 오매칭일 수 없으므로 --short-threshold를 면제하고
+    기본 임계값만 본다 — 즉 short_threshold=96에서도 채택되어야 한다."""
+    res = _match_map(synthetic_map, tmp_path, [("SOLUCORTEF", 200)],
+                     threshold=92.0, short_threshold=96.0)
+    assert res["SOLUCORTEF"]["ingredient_norm"] == "HYDROCORTISONE"
 
 
 def test_output_carries_dictionary_version(synthetic_map, tmp_path):
