@@ -39,6 +39,15 @@ PROD_AI_EXCLUDE = {
 # 단어 경계(\b)를 써서 NOSCAPINE 같은 실제 성분명은 안 걸리게 한다.
 _NOS_PATTERN = re.compile(r"\bNOS\b")
 
+# prod_ai에서 아포스트로피/프라임 부호(')가 "^"로 깨져 들어오는 인코딩 아티팩트.
+# 실측(2026-09-30, 액션플랜 1장 "prod_ai 회수분 진짜 오류 확인"): prod_ai에서 "^"가
+# 들어간 고유값 28개 전수 조사 결과 28개 전부 "RIBOFLAVIN 5^-PHOSPHATE"(→5'-PHOSPHATE),
+# "ST. JOHN^S WORT"(→JOHN'S) 등 화학명 locant·소유격 자리의 아포스트로피 대체였고
+# 다른 용도는 없었다(고유명 30개·신고 3,518건, 회수분의 0.03%). drugname 자유기재
+# 필드는 "^"를 따옴표 대용(예: "^SANOFI-AVENTIS^")·거듭제곱 기호(예: "M^2")로도 쓰지만,
+# prod_ai는 FDA가 직접 채운 구조화 필드라 이 패턴만 나타난다 — 그래서 여기서만 치환.
+_CARET_AS_APOSTROPHE = re.compile(r"\^")
+
 # 제형·투여경로·방출형태·약전 표기 등 — 끝에서부터 반복적으로 뗀다
 DOSAGE_FORM_WORDS = {
     "TABLET", "TABLETS", "TAB", "TABS", "CAPSULE", "CAPSULES", "CAP", "CAPS",
@@ -118,6 +127,7 @@ def resolve_prod_ai(prod_ai: str | None) -> str | None:
     if not prod_ai or not prod_ai.strip():
         return None
     parts = split_backslash_parts(prod_ai) or [prod_ai]
+    parts = [_CARET_AS_APOSTROPHE.sub("'", p) for p in parts]
     normed = {normalize_ingredient(p) for p in parts} - PROD_AI_EXCLUDE
     normed = sorted(v for v in normed if not _NOS_PATTERN.search(v))
     if not normed:
