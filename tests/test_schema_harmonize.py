@@ -8,11 +8,11 @@ from conftest import load_module
 
 
 def get_faers_module():
-    return load_module("load_faers_master", "bronze/load_faers_master.py")
+    return load_module("load_faers_master", "bronze/loaders/load_faers_master.py")
 
 
 def get_aers_module():
-    return load_module("load_aers_master", "bronze/load_aers_master.py")
+    return load_module("load_aers_master", "bronze/loaders/load_aers_master.py")
 
 
 def test_harmonize_legacy_demo_handles_bom_leading_space_and_new_columns(local_iceberg_spark):

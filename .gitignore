@@ -26,6 +26,7 @@ out/
 *.sqlite3
 *.duckdb
 *.duckdb.wal
+bronze/verification/*.json
 
 # 새 폴더 구조로 정리 중 — 기존 폴더 전부 임시 ignore
 samples/
