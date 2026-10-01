@@ -162,6 +162,11 @@ def _alnum(s: str) -> str:
 # 후보 번호가 원본에 없으면 다른 약으로 본다. 단독 I·V·X는 오탐이 커서 제외(2글자 이상만).
 _DESIG = re.compile(r"\b(?:[A-Z]\d+|VIII|VII|XIII|XII|III|II|IV|IX|VI|XI)\b")
 
+# 원본에서 '단독' 글자와 숫자가 비영숫자(공백·하이픈·깨진 '?' 등)로 떨어진 것만 결합한다
+# ('B 12'·'B-12'·'B?12' → 'B12'). 단어 끝 글자는 \b가 없어 결합되지 않는다('TAB 12'의 B).
+# 과거 _alnum()이 공백을 전부 지워 "TAB12"→"B12"로 오검출하던 버그 수정(PR 리뷰 코멘트 반영).
+_LETTER_NUM_GAP = re.compile(r"\b([A-Z])[^A-Z0-9]+(\d+)")
+
 
 def variant_designator_mismatch(raw: str, cand: str) -> bool:
     """후보에 든 번호 지정자(B6·B12·D3·FACTOR IX…)가 원본 이름에 없으면 True(=오변형).
@@ -171,9 +176,21 @@ def variant_designator_mismatch(raw: str, cand: str) -> bool:
     'FACTOR I'가 'FACTOR IX'에 붙는 식(감사에서 확인). 정규화가 숫자를 떼기 전 원본(raw)을
     봐서, 후보의 번호가 원본에 없으면 서로 다른 약으로 보고 채택을 막는다.
     ('PARAGARD 380A'의 '380A'는 숫자+문자라 이 패턴에 안 걸려 오작동 없음. 단독 숫자
-    용량(20MG 등)은 지정자로 안 보므로 브랜드→성분 매칭을 방해하지 않는다.)"""
-    rawc = _alnum(raw)
-    return any(tok not in rawc for tok in set(_DESIG.findall(cand.upper())))
+    용량(20MG 등)은 지정자로 안 보므로 브랜드→성분 매칭을 방해하지 않는다.)
+
+    지정자 유형별로 원본 존재 여부를 다르게 본다(_alnum 전체결합 버그 수정):
+    - 글자+숫자(B12·D3): 앞 글자가 '단독'이어야 하므로 왼쪽에 다른 글자가 붙으면 무효
+      ('TAB 12'→'TAB12'의 'B12'는 기각). 'B 12'·'B?12'는 위에서 'B12'로 결합돼 인정.
+    - 로마숫자(III·IX): 단어에 붙어 있어도 유효('ANTITHROMBINIII'의 III 인정)."""
+    raw_norm = _LETTER_NUM_GAP.sub(r"\1\2", raw.upper())
+    for tok in set(_DESIG.findall(cand.upper())):
+        if tok[:1].isalpha() and tok[1:2].isdigit():          # 글자+숫자형(B12 등)
+            found = re.search(r"(?<![A-Z])" + re.escape(tok), raw_norm) is not None
+        else:                                                 # 로마숫자형(III·IX 등)
+            found = tok in raw_norm
+        if not found:
+            return True
+    return False
 
 
 # 정규화가 활성성분의 일부(염·수식어)를 떼어내 남은 '조각'이 사전에 stub으로 존재하는 경우,
@@ -181,6 +198,51 @@ def variant_designator_mismatch(raw: str, cand: str) -> bool:
 # FUMARATE가 떨어져 'DIMETHYL'이 되고 사전의 stub 'DIMETHYL'에 붙는다(감사에서 확인).
 # 새 사례가 나오면 여기에 추가(근본 해결은 사전 정제/normalize 예외).
 DEGENERATE_TARGETS = {"DIMETHYL"}
+
+
+# 치료군(class)·제형·투여경로·상태/수식어 단어 목록. 자유기재명이 "이것만으로" 이뤄져
+# 특정 성분 토큰이 하나도 없으면(예: "ANTIHISTAMINES", "EYE DROPS", "LAXATIVE",
+# "COUGH DROP", "STOOL SOFTENER"), 유사도로 사전의 class/제형 stub에 붙어 단일 성분
+# (ANTIHISTAMINES→DIPHENHYDRAMINE 등)으로 오매칭된다. stage2_suspicious.csv 감사(CLASS
+# 플래그 ~69건, 최다 볼륨 ANTIHISTAMINE≈1,100신고)에서 확인된 오탐 — 근본원인은 사전에
+# class/제형 stub이 product로 들어있는 것이라 2단계에서 입력 쪽을 막는다(사전 정제는 별건).
+# 실제 성분/브랜드 토큰이 하나라도 남으면("FLUTICASONE PROPIONATE NASAL SPRAY"의
+# FLUTICASONE, "SODIUM HYALURONATE EYE DROP"의 SODIUM) 통과시킨다 — precision 우선, 애매하면 3단계로.
+STRUCTURE_WORDS = frozenset({
+    # 치료군/범주 (class)
+    "ANTIHISTAMINE", "ANTIHISTAMINES", "ANTIHISTAMIN", "ANTIHISTAMINNE",
+    "ANTACID", "ANTACIDS", "LAXATIVE", "LAXATIVES",
+    "DECONGESTANT", "DECONGESTANTS", "ANALGESIC", "ANALGESICS",
+    "ANTIDIARRHEAL", "DIARRHEAL", "DIARRHEA", "DIARRHE",
+    "ALLERGY", "MEDICINE", "MEDICINES", "MEDICATED",
+    # 제형/투여경로/부위
+    "EYE", "EAR", "NASAL", "ORAL", "TOPICAL", "OPHTHALMIC",
+    "DROP", "DROPS", "DROPOS", "SPRAY", "CREAM", "CREAMS", "OINTMENT",
+    "LOTION", "GEL", "SOLUTION", "SOLN", "SUSPENSION", "SUSP", "SYRUP",
+    "INJECTION", "INJECTABLE", "PATCH", "TABLET", "TABLETS", "TAB", "TABS",
+    "CAPSULE", "CAPSULES", "CAP", "CAPS", "LOZENGE", "LOZENGES", "POWDER", "OIL",
+    "SUPPOSITORY", "SOFTENER", "SOFTENERS", "STOOL", "COUGH",
+    "LUBRICANT", "LUBRICANTS", "LUBRICATING", "SOFT", "CHEW", "CHEWS",
+    # 상태/수식어
+    "ARTHRITIS", "ECZEMA", "ITCH",
+    "WOMENS", "WOMEN", "MENS", "CHILDRENS", "CHILDREN", "INFANTS", "INFANT",
+    "GENTLE", "NATURAL", "HERBAL", "DAILY", "MAXIMUM", "STRENGTH", "EXTRA",
+    "HOUR", "HOURS", "HR", "NIGHT", "NIGHTTIME", "NIGHTIME", "DAY",
+    "RELIEF", "RELEASE", "NOS", "ANTI",
+})
+
+_TOKEN_SPLIT = re.compile(r"[^A-Z0-9]+")
+
+
+def class_or_form_only(name: str) -> bool:
+    """자유기재명이 치료군·제형·수식어 단어로만 이뤄졌는지(=특정 성분 토큰 없음).
+    True면 유사도로 사전의 class/제형 stub에 붙더라도 채택하지 않는다(→3단계).
+    숫자 전용 토큰(용량·"12 HOUR")과 한 글자 토큰은 무의미로 보고 무시한다.
+    원본(raw) 기준으로 판단한다 — normalize_query가 일부 제형어를 이미 떼어 판단이
+    흔들리지 않게."""
+    toks = [t for t in _TOKEN_SPLIT.split(name.upper()) if len(t) >= 2]
+    meaningful = [t for t in toks if t not in STRUCTURE_WORDS and not t.isdigit()]
+    return bool(toks) and not meaningful
 
 
 def run_match(miss_path, out_path, map_path, scorer_name, threshold, limit, margin,
@@ -193,7 +255,7 @@ def run_match(miss_path, out_path, map_path, scorer_name, threshold, limit, marg
           f", ambiguous(복합제)={'채택' if keep_ambiguous else '보류→3단계'}", flush=True)
 
     n_matched = n_ambiguous = n_low_margin = n_short_reject = 0
-    n_variant_reject = n_ambiguous_held = n_degenerate = 0
+    n_variant_reject = n_ambiguous_held = n_degenerate = n_class_reject = 0
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=OUT_FIELDS)
         w.writeheader()
@@ -216,6 +278,11 @@ def run_match(miss_path, out_path, map_path, scorer_name, threshold, limit, marg
                 continue
             if score - second < margin:      # 1·2등 초박빙 → 애매, 채택 보류(3단계로)
                 n_low_margin += 1
+                continue
+            # 치료군/제형만 있고 특정 성분이 없는 이름(ANTIHISTAMINES·EYE DROPS·LAXATIVE…)은
+            # 사전의 class/제형 stub에 붙어 단일 성분으로 오매칭되므로 기각 → 3단계로(감사 반영).
+            if class_or_form_only(name):
+                n_class_reject += 1
                 continue
             # 비타민류 번호 변형 불일치(VITAMIN B-12 → VITAMIN B6 등)면 기각 → 3단계로.
             # normalize가 숫자를 떼기 전 원본(name)으로 판단한다.
@@ -251,7 +318,7 @@ def run_match(miss_path, out_path, map_path, scorer_name, threshold, limit, marg
     print(f"채택 {n_matched:,}개 (scorer={scorer_name}, ambiguous {n_ambiguous:,}개)", flush=True)
     print(f"  보류/기각 → 마진<{margin}: {n_low_margin:,} / 짧은이름: {n_short_reject:,} / "
           f"번호변형불일치: {n_variant_reject:,} / 복합제(ambiguous): {n_ambiguous_held:,} / "
-          f"불량stub: {n_degenerate:,}", flush=True)
+          f"불량stub: {n_degenerate:,} / class·제형만: {n_class_reject:,}", flush=True)
     print(f"→ {out_path}", flush=True)
 
 
