@@ -48,6 +48,7 @@ def fetch_drugname_counts() -> list[tuple[str, int, str | None]]:
     con = duckdb.connect()
     con.execute("INSTALL iceberg; LOAD iceberg; INSTALL httpfs; LOAD httpfs;")
     con.execute("CREATE SECRET (TYPE s3, PROVIDER credential_chain, REGION 'ap-northeast-2');")
+    con.execute("SET unsafe_enable_version_guessing = true;")
     return con.execute(f"""
         WITH base AS (
           SELECT upper(trim(drugname)) AS name,
