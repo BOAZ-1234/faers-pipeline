@@ -23,13 +23,19 @@ alias 추출 전략:
      이상적이나, 현재는 사전 전체를 alias로 쓰는 baseline 방식으로 시작한다.
 
 재현성:
-  corpus jsonl 첫 줄은 __meta__ 행 — dictionary_version, embedding_model, retrieval_version.
+  corpus는 모델별 파일(alias_corpus_{model}.jsonl) — 각 FAISS 인덱스와 1:1로 짝.
+  첫 줄은 __meta__ 행 — dictionary_version, embedding_model, retrieval_version.
   사전이 바뀌면(dictionary_version 변경) corpus와 인덱스를 다시 빌드해야 한다.
+
+입력 경로:
+  MAP_DEFAULT는 현재 팀 스냅샷이 올라와 있는 silver/reaction_dict/output/을 가리킨다.
+  build_map.py의 생산 위치(silver/drug_dict/)와 다르므로, 다른 체크아웃에서 돌릴 땐
+  --map으로 실제 drug_ingredient_map.csv 경로를 넘긴다.
 
 실행:
   python3 build_index.py                    # E5-small (기본)
   python3 build_index.py --model sapbert    # SapBERT
-  python3 build_index.py --model e5 --map ../../reaction_dict/output/drug_ingredient_map.csv
+  python3 build_index.py --model e5 --map <경로>/drug_ingredient_map.csv
 """
 from __future__ import annotations
 
@@ -76,16 +82,20 @@ def extract_aliases(map_path: Path) -> list[dict]:
             # ingredient_set이 여러 후보를 " ; "로 갖는 경우 첫 번째 채택
             iset = ingr_set.split(" ; ")[0].strip() if ingr_set else ingr_norm.lower()
 
-            candidates = {
+            # alias 후보 — 순서 보존(list). set을 쓰면 프로세스마다 순회 순서가
+            # 달라져(해시 랜덤화) corpus 행 ID가 빌드마다 바뀐다. E5/SapBERT를
+            # 따로 빌드하면 인덱스 행 ID와 corpus 행이 어긋나 엉뚱한 성분을 반환.
+            # 중복 제거는 아래 seen dict가 담당하므로 list로 충분하다.
+            candidates = [
                 product,
                 normalize_query(product),
                 ingr_norm,
-            }
+            ]
             # ingredient_set 파이프 분해 → 각 성분도 alias
             for part in iset.split("|"):
                 part = part.strip()
                 if part:
-                    candidates.add(part.upper())
+                    candidates.append(part.upper())
 
             for alias in candidates:
                 alias = alias.strip()
@@ -130,7 +140,10 @@ def build(map_path: Path, model_key: str, out_dir: Path) -> None:
     index.add(vecs)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    corpus_path = out_dir / "alias_corpus.jsonl"
+    # corpus를 모델별 파일로 분리 — 인덱스 행 ID와 corpus 행이 항상 짝이 되게.
+    # 공유 파일 1개면 두 번째 빌드가 덮어써서, 먼저 만든 인덱스가 바뀐 corpus를
+    # 참조하는 사고가 난다(행 순서가 어긋나면 조용히 틀린 성분 반환).
+    corpus_path = out_dir / f"alias_corpus_{model_key}.jsonl"
     index_path = out_dir / f"faiss_{model_key}.index"
 
     # §7 재현성: corpus 첫 줄은 __meta__ — Langfuse trace의 retrieval_version 등과 대응
@@ -141,7 +154,7 @@ def build(map_path: Path, model_key: str, out_dir: Path) -> None:
         "retrieval_version": f"r-{model_key}-v1",
         "alias_count": len(rows),
     }
-    # corpus는 model별로 공유 (alias/ingredient_set은 동일, meta만 model_key 포함)
+    # corpus는 model별 파일 — 각 인덱스가 자기 corpus를 짝으로 가진다
     with open(corpus_path, "w", encoding="utf-8") as f:
         f.write(json.dumps(meta, ensure_ascii=False) + "\n")
         for r in rows:

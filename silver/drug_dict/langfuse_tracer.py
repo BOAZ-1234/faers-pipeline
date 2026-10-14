@@ -5,8 +5,9 @@ LLM 판정 1건 = Trace 1개. 구조:
   Trace (raw_drug_name)
     └ Generation (llm-judge)
 
-langfuse 3.x(OTel 기반). Cloud v4는 OTLP 수집 경로만 실시간 반영되므로
-구버전 2.x의 /api/public/ingestion은 쓰지 않는다.
+langfuse 3.x(OTel 기반) 전용. 4.x는 start_as_current_span이 제거돼
+trace()가 깨지고, 2.x의 /api/public/ingestion은 Cloud v4에서 실시간 반영이
+안 된다. 버전은 requirements.txt에 `langfuse>=3,<4`로 핀돼 있다.
 
 사용법:
   tracer = LangfuseTracer()

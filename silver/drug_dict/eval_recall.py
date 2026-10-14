@@ -13,9 +13,10 @@ Recall@1/5/10/20 곡선을 출력한다. E5 vs SapBERT 비교에 쓴다.
   모든 성분이 Top-K 안에 있어야 hit — AND 기준).
 
 실행:
-  python3 eval_recall.py --index output/faiss_e5.index --corpus output/alias_corpus.jsonl
-  python3 eval_recall.py --index output/faiss_sapbert.index --corpus output/alias_corpus.jsonl \\
+  python3 eval_recall.py --index output/faiss_e5.index --corpus output/alias_corpus_e5.jsonl
+  python3 eval_recall.py --index output/faiss_sapbert.index --corpus output/alias_corpus_sapbert.jsonl \\
       --model sapbert --out-csv output/recall_sapbert.csv
+  # 인덱스와 corpus는 같은 model_key 짝으로 넘긴다(행 ID가 짝으로 묶여 있음).
 """
 from __future__ import annotations
 
@@ -80,7 +81,7 @@ def recall_at_k(
     model,
     prefix: str,
     k_max: int,
-) -> dict[int, float]:
+) -> tuple[dict[int, float], dict[int, int]]:
     import numpy as np
 
     vecs = model.encode(
@@ -107,7 +108,7 @@ def recall_at_k(
                 hits[k] += 1
 
     n = len(queries)
-    return {k: hits[k] / n for k in KS}
+    return {k: hits[k] / n for k in KS}, hits
 
 
 def main() -> None:
@@ -161,11 +162,12 @@ def main() -> None:
     if not queries:
         sys.exit("평가 대상 쿼리 없음 (--unmatched와 dev set이 겹치지 않음)")
 
-    scores = recall_at_k(queries, gold, corpus, index, model, QUERY_PREFIX[args.model], max(KS))
+    scores, hits = recall_at_k(queries, gold, corpus, index, model, QUERY_PREFIX[args.model], max(KS))
+    n = len(queries)
 
     print(f"\nRecall@K ({args.model}):")
     for k in KS:
-        print(f"  K={k:<3}: {scores[k]:.4f}  ({int(scores[k]*len(queries))}/{len(queries)})")
+        print(f"  K={k:<3}: {scores[k]:.4f}  ({hits[k]}/{n})")
 
     if args.out_csv:
         args.out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -173,8 +175,7 @@ def main() -> None:
             w = csv.writer(f)
             w.writerow(["model", "k", "recall", "hits", "total"])
             for k in KS:
-                w.writerow([args.model, k, f"{scores[k]:.4f}",
-                             int(scores[k] * len(queries)), len(queries)])
+                w.writerow([args.model, k, f"{scores[k]:.4f}", hits[k], n])
         print(f"\n결과 → {args.out_csv}")
 
 
