@@ -9,6 +9,8 @@ Stage 0~3 전 단계가 이 함수 하나를 공유한다 — 단계마다 다�
 예시 하나만 있고 정확한 목록은 기획서에 없어 실제 FAERS drugname 표본을 보고
 직접 채운 초안이다 — 검토 필요.
 """
+from __future__ import annotations
+
 import re
 import sys
 from pathlib import Path
