@@ -219,6 +219,16 @@ def test_resume_after_interruption_does_not_redo_or_duplicate(tmp_path, fixture_
     assert counts["resolution"] == 9
 
 
+def test_routing_reason_is_entry_reason_not_decision(tmp_path, fixture_source):
+    """routing_reason은 '왜 3단계까지 왔나'라 판정 결과와 별개로 기록된다(PR#52 리뷰)."""
+    storage = h.LocalStorage(str(tmp_path / "run"))
+    h.run(_entities(), [fixture_source], ScriptedJudge(RESPONSES), storage, log=lambda *_: None)
+    recs = {r["normalized"]: r for r in h.iter_records(storage)}
+    assert (recs["KLACID"]["routing_reason"], recs["KLACID"]["decision"]) == (h.ROUTING_NO_MATCH, "MATCH")
+    assert (recs["ADVIL"]["routing_reason"], recs["ADVIL"]["decision"]) == (h.ROUTING_NO_MATCH, "NONE")
+    assert recs["XYZFAKEDRUG"]["routing_reason"] == h.ROUTING_NO_CANDIDATES
+
+
 def test_mock_judge_and_no_source(tmp_path, fixture_source):
     storage = h.LocalStorage(str(tmp_path / "run"))
     stats = h.run(_entities(), [fixture_source], h.MockJudge(), storage, log=lambda *_: None)

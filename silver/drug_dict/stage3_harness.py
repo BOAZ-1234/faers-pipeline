@@ -59,6 +59,13 @@ DEFAULT_PROMPT = HERE / "prompts" / "stage3_judge_v1.txt"
 DECISIONS = ("MATCH", "MULTI", "NONE")
 STATUS_BY_DECISION = {"MATCH": "보류", "MULTI": "보류", "NONE": "미해결"}
 
+# routing_reason = "이 이름이 **왜 3단계까지 내려왔나**"(진입 사유). LLM 판정 결과(decision)와는 별개라
+# routing=NO_MATCH인데 decision=MATCH인 레코드는 정상이다 — "1·2단계는 못 찾았고, LLM이 찾았다"는 뜻.
+# 값은 #47 langfuse_tracer.ROUTING과 같은 이름을 쓴다. 2단계 보류 사유(FUZZY_LOW_MARGIN·FUZZY_CONFLICT)는
+# #43 연결 시 2단계 결과를 받아 세분화한다(PR#52 리뷰).
+ROUTING_NO_MATCH = "NO_MATCH"            # 1·1.5·2단계 모두 후보 없음/기각 → triage UNKNOWN
+ROUTING_NO_CANDIDATES = "NO_CANDIDATES"  # 3단계 후보 생성기도 후보 0개 → LLM 미호출(하네스 전용)
+
 # dbt contract(contracts/dbt/models/staging/schema.yml)와 같은 컬럼·순서
 CANDIDATE_FIELDS = [
     "entity_id", "raw_drug_name", "normalized_drug_name", "stage", "candidate_rank",
@@ -339,7 +346,7 @@ def build_record(entity: Entity, cands: list[Candidate], d: Decision, routing_re
         "resolved_ingredient_set": ingredient_set,
         "unii": unii,
         "resolved_stage": STAGE,
-        "resolved_method": "llm" if routing_reason != "NO_CANDIDATES" else "none",
+        "resolved_method": "llm" if routing_reason != ROUTING_NO_CANDIDATES else "none",
         "confidence": None,  # v1: LLM 자기확신을 쓰지 않음(설계 결정 9)
         "pipeline_version": meta["pipeline_version"],
         "dictionary_version": meta["dictionary_version"],
@@ -362,7 +369,7 @@ def build_record(entity: Entity, cands: list[Candidate], d: Decision, routing_re
         "normalized": entity.normalized,
         "raw_names": entity.raw_names,
         "n_reports": entity.n_reports,
-        "routing_reason": routing_reason,
+        "routing_reason": routing_reason,  # 진입 사유. 판정 결과는 아래 decision
         "decision": d.decision,
         "candidate_ids": d.candidate_ids,
         "note": d.note,
@@ -508,10 +515,10 @@ def run(entities: list[Entity], sources: list, judge, storage, *, top_k: int = 1
     for e in todo:
         cands = union_candidates([s.candidates(e.normalized) for s in sources], top_k)
         if not cands:
-            routing, d = "NO_CANDIDATES", Decision("NONE", note="no candidates — LLM not called")
+            routing, d = ROUTING_NO_CANDIDATES, Decision("NONE", note="no candidates — LLM not called")
             rec = build_record(e, cands, d, routing, meta)
         else:
-            routing = "NO_MATCH"  # 1·2단계 모두 실패해서 온 것. 2단계 보류 사유는 #43 연결 후 세분화
+            routing = ROUTING_NO_MATCH  # 진입 사유(판정 결과와 별개) — 위 ROUTING_* 설명 참고
             with tracer.trace(e, cands, meta, routing) as handle:
                 d = judge.judge(e, cands)
                 rec = build_record(e, cands, d, routing, meta)
