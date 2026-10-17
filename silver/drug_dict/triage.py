@@ -58,14 +58,21 @@ def load_rows(path: Path) -> list[tuple[str, int]]:
     return rows
 
 
-# --- 추가 OUT_OF_SCOPE 규칙 (잔여 감사로 검증, 2026-10-05) -------------------------
+# --- 추가 OUT_OF_SCOPE 규칙 (잔여 감사로 검증, 2026-10-05 / #48 리뷰 2026-10-17) -----
 # 비타민: "어떤 비타민인지 특정 안 되는 것"만 제외한다. 특정 비타민(VITAMIN D/C/B12,
 #   대괄호에 성분이 적힌 것, 특정 화학/미네랄명)은 매핑 가능한 진짜 성분이라 보호.
 #   감사 실측: 비특정만 추리면 9,078개(신고 115,537), 특정분 7,240개는 보호해야 손실 0.
 _VIT_CLASS = re.compile(r"\b(MULTI\s?VITAMIN|MULTIVITAMINS?|VITAMIN[S]?|MINERAL[S]?)\b")
-_VIT_SPECIFIC = re.compile(
-    r"\bVITAMIN\s*[A-K]\d*\b"                            # VITAMIN D, VITAMIN B12, VITAMIN C
-    r"|\b(CALCIUM|IRON|ZINC|MAGNESIUM|POTASSIUM|SODIUM|SELENIUM|FOLIC|FOLATE|"
+# 번호가 붙은 특정 비타민: VITAMIN B12/B-12/B 12/B 2/D3 — 글자와 숫자 사이 구분자(공백·
+#   하이픈)를 허용해야 한다. normalize_query가 'VITAMIN B-12'의 숫자를 떼어 'VITAMIN B'
+#   (PROD_AI_EXCLUDE)로 떨어뜨리므로, raw 기준으로 번호를 잡아 보호한다(#48 리뷰: 185개·
+#   신고 2,773건이 이렇게 손실되고 있었음).
+_VIT_LETTER_NUM = re.compile(r"\bVITAMIN\s*[A-K][\s-]*\d+")
+# 단독으로도 특정인 비타민 문자: A·C·D·E·K (B는 비특정 B군이라 제외).
+_VIT_SPECIFIC_LETTER = re.compile(r"\bVITAMIN\s*[ACDEK]\b")
+# 특정 화학/미네랄명 — 그 자체로 매핑 가능한 진짜 성분.
+_VIT_SPECIFIC_CHEM = re.compile(
+    r"\b(CALCIUM|IRON|ZINC|MAGNESIUM|POTASSIUM|SODIUM|SELENIUM|FOLIC|FOLATE|"
     r"ASCORBIC|BIOTIN|NIACIN|THIAMINE?|RIBOFLAVIN|PYRIDOXINE|COBALAMIN|TOCOPHEROL|"
     r"RETINOL|CHOLECALCIFEROL|COLECALCIFEROL|OMEGA|FISH\s?OIL|D3|B12|B6)\b")
 # 명백 화장품(약용 가능성 없는 것만). SHAMPOO/SOAP/SUNSCREEN/MOUTHWASH 등은 약용 제품이
@@ -75,14 +82,41 @@ _VIT_SPECIFIC = re.compile(
 _COSMETIC_CLEAR = re.compile(
     r"\b(FACE\s?WASH|CLEANSING|CLEANSER|TONER|MOISTURI[SZ]ER|MASCARA|"
     r"LIPSTICK|MAKEUP|EYE\s?BRIGHTENING|BLACKHEAD|PORE)\b")
+# 화장품 키워드가 있어도 OTC 활성성분이 적혀 있으면 진짜 약이므로 제외 금지(#48 리뷰:
+#   "...WITH BENZOYL PEROXIDE 1%"·SPF 표기 제품 등 133개·신고 215건이 CLEANSER 등
+#   화장품 키워드에 걸려 손실되고 있었음).
+_COSMETIC_ACTIVE = re.compile(
+    r"\b(BENZOYL\s?PEROXIDE|SALICYLIC\s?ACID|ADAPALENE|SULFUR|SPF|SUNSCREEN|"
+    r"HYDROCORTISONE|CLOTRIMAZOLE|KETOCONAZOLE|MICONAZOLE|RETINOL|GLYCOLIC\s?ACID)\b")
+# 성분 나열 구분자: 대괄호 · 세미콜론 · 역슬래시.
+_PART_SEP = re.compile(r"[\[\];\\]")
+
+
+def is_specific_vitamin(name_up: str) -> bool:
+    """특정 비타민/미네랄/성분이 지정됐는지 — 지정됐으면 어떤 제외 규칙보다 먼저 보호한다."""
+    return bool("[" in name_up
+                or _VIT_LETTER_NUM.search(name_up)
+                or _VIT_SPECIFIC_LETTER.search(name_up)
+                or _VIT_SPECIFIC_CHEM.search(name_up))
 
 
 def is_nonspecific_vitamin(name_up: str) -> bool:
-    if "[" in name_up:                        # 대괄호 성분 리스트 = 특정됨 → 보호
-        return False
     if not _VIT_CLASS.search(name_up):
         return False
-    return not _VIT_SPECIFIC.search(name_up)
+    return not is_specific_vitamin(name_up)
+
+
+def _has_specific_besides_nos(name_up: str) -> bool:
+    """이름이 성분 나열(대괄호/';'/'\\')이고 NOS가 아닌 '특정' 부품이 하나라도 있으면 True.
+    그러면 'NOS가 들어있다'는 이유로 전체를 버리지 않고 UNKNOWN에 남겨 LLM/사전이 특정
+    성분을 살린다(#48 리뷰: ESTROGEN NOS;METHYLTESTOSTERONE 등 1,131개·신고 5,315건)."""
+    if not _PART_SEP.search(name_up):         # 나열 구조가 아니면 단일 'X NOS' → 통상 제외
+        return False
+    for p in (p.strip() for p in _PART_SEP.split(name_up)):
+        if not p or _NOS_PATTERN.search(p) or class_or_form_only(p) or p in PROD_AI_EXCLUDE:
+            continue
+        return True
+    return False
 
 
 def out_of_scope_reason(name: str) -> str | None:
@@ -90,16 +124,24 @@ def out_of_scope_reason(name: str) -> str | None:
     NOS는 raw 기준으로 본다(normalize_query가 끝의 NOS를 떼어 'INSULIN NOS'→'INSULIN'이
     되면 못 잡으므로). PROD_AI_EXCLUDE는 raw·정규화 양쪽으로 본다."""
     up = name.strip().upper()
+    # 특정 비타민/성분은 어떤 제외 규칙보다 먼저 보호한다. 안 그러면 normalize_query가
+    # 숫자를 떼어 'VITAMIN B-12'→'VITAMIN B'(PROD_AI_EXCLUDE)로 떨어진다(#48 리뷰).
+    if is_specific_vitamin(up):
+        return None
     if class_or_form_only(name):              # 전부 치료군/제형/수식어 토큰
         return "class/form"
-    if _NOS_PATTERN.search(up):               # "... NOS" (INSULIN NOS, PROBIOTICS NOS ...)
+    # "... NOS"는 제외하되, 성분 나열 중 NOS 아닌 특정 부품이 섞였으면 전체를 버리지
+    # 않고 UNKNOWN 유지(#48 리뷰 — ESTROGEN NOS;METHYLTESTOSTERONE 등).
+    if _NOS_PATTERN.search(up) and not _has_specific_besides_nos(up):
         return "NOS"
     if up in PROD_AI_EXCLUDE or normalize_query(name) in PROD_AI_EXCLUDE:
         return "prod_ai_exclude"              # VITAMINS, UNSPECIFIED INGREDIENT, COSMETICS ...
     if is_nonspecific_vitamin(up):            # MULTIVITAMINS, MINERALS\VITAMINS (특정분 보호)
         return "vitamin_class"
-    if _COSMETIC_CLEAR.search(up):            # PROACTIV FACE WASH/TONER/SERUM ...
-        return "cosmetic"
+    # 화장품 키워드가 있어도 OTC 활성성분(벤조일퍼옥사이드·살리실산·SPF…)이 적혀 있으면
+    # 진짜 약 → 제외 금지(#48 리뷰).
+    if _COSMETIC_CLEAR.search(up) and not _COSMETIC_ACTIVE.search(up):
+        return "cosmetic"                     # PROACTIV FACE WASH/TONER/MOISTURIZER ...
     return None
 
 

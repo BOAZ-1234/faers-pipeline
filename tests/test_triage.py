@@ -29,6 +29,7 @@ triage = pytest.importorskip("triage", reason="rapidfuzz 필요 (pip install rap
     (r"MINERALS\VITAMINS", "vitamin_class"),
     ("PRENATAL VITAMINS", "vitamin_class"),
     ("MULTIPLE VITAMINS", "vitamin_class"),
+    ("VITAMIN B", "prod_ai_exclude"),          # 비특정 B군은 여전히 제외 (#48 리뷰 반영 후에도)
     ("PROACTIV MD DEEP CLEANSING FACE WASH", "cosmetic"),   # 명백 화장품
     ("PROACTIV GREEN TEA MOISTURIZER", "cosmetic"),
     ("PROACTIV EYE BRIGHTENING SERUM", "cosmetic"),         # SERUM 아닌 EYE BRIGHTENING으로
@@ -50,6 +51,15 @@ def test_out_of_scope(name, reason):
     "KETOCONAZOLE SHAMPOO",                    # 약용 샴푸
     "IMMUNE SERUM GLOBULIN",                   # 의학 혈청 (SERUM 오탐 방지)
     "ANTI-THYMOCYTE SERUM",
+    # --- #48 리뷰 반영: 특정 비타민이 구분자로 번호와 떨어져도 보호 ---
+    "VITAMIN B-12", "VITAMIN B 12", "VITAMIN B 2",   # normalize가 숫자 떼어 'VITAMIN B'로 안 떨어지게
+    # --- #48 리뷰 반영: NOS 섞인 성분 나열에서 특정 부품 보호 ---
+    "ESTROGEN NOS;METHYLTESTOSTERONE",         # METHYLTESTOSTERONE은 특정 성분
+    "CALCIUM CITRATE;VITAMIN D NOS",           # CALCIUM CITRATE / VITAMIN D 특정
+    "CENTRUM SILVER [ASCORBIC ACID;CALCIUM;MINERALS NOS]",  # 대괄호 성분 리스트
+    # --- #48 리뷰 반영: 화장품 키워드라도 활성성분 있으면 보호 ---
+    "PROACTIV CLEANSER WITH BENZOYL PEROXIDE 1%",
+    "PROACTIV MOISTURIZER SPF 30",
 ])
 def test_protected(name):
     assert triage.out_of_scope_reason(name) is None
