@@ -50,16 +50,18 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
-from normalize import normalize_query
+from normalize import normalize_query, DOSAGE_FORM_WORDS
 from build_map import normalize_ingredient
 
 DEFAULT_MAP = HERE.parent.parent / "out" / "drug_ingredient_map.csv"
 
 # 숫자+단위 = 용량/농도 표기. 이 지점부터 뒤는 전부 용량·제형·기기 설명이라 통째로 자른다.
 # 앞이 영문자인 숫자(PD4·B12·T4)는 제품명/지정자일 수 있어 제외한다.
+# 복합제 용량은 숫자가 /·-로 이어진 뒤 단위가 한 번만 붙는다(TRIBENZOR 40/5/12.5 MG, HYCODAN 5-1.5 MG).
 _UNIT = (r"(?:MG|MCG|UG|G|GM|KG|ML|L|MEQ|IU|UNITS?|%|MMOL|"
          r"MILLIGRAMS?|MICROGRAMS?|GRAMS?|MILLILITERS?|MILLILITRES?)")
-STRENGTH = re.compile(r"(?<![A-Z])\d+(?:[.,]\d+)?\s*" + _UNIT + r"(?![A-Z])")
+_NUM = r"(?:\d+(?:[.,]\d+)?|[.,]\d+)"  # ".5 MG"처럼 앞 0을 생략한 소수 포함
+STRENGTH = re.compile(r"(?<![A-Z\d])" + _NUM + r"(?:\s*[/-]\s*" + _NUM + r")*\s*" + _UNIT + r"(?![A-Z])")
 _PAREN = re.compile(r"\(([^()]*)\)")
 _WS = re.compile(r"\s+")
 
@@ -73,6 +75,21 @@ DEVICE_TAIL_WORDS = frozenset({
     "CHEWABLE", "COATED", "FILM-COATED", "TABLETS", "TABLET", "CAPSULES", "CAPSULE",
     "SOLUTION", "SUSPENSION", "INJECTION", "FOR", "ORAL", "CREAM", "OINTMENT",
 })
+
+# 괄호 안이 제형·투여경로 설명뿐이면("(NASAL SOLUTION)", "(FOR ORAL SOLUTION)") 성분 정보가 없다.
+# 정규화하면 "NASAL" 같은 일반어만 남는데, 사전에 그런 이름의 제품(동종요법 등)이 있어 엉뚱한
+# 성분으로 붙는다(실측). 이런 괄호는 paren_inner 후보로 쓰지 않는다.
+_ROUTE_WORDS = frozenset({
+    "NASAL", "EYE", "EAR", "OPHTHALMIC", "OTIC", "RECTAL", "VAGINAL", "SUBLINGUAL", "BUCCAL",
+    "TRANSDERMAL", "INHALATION", "INHALED", "INTRAVENOUS", "INTRAMUSCULAR", "SUBCUTANEOUS",
+    "DROPS", "DROP", "SPRAY", "GEL", "LOTION", "PATCH", "POWDER", "SYRUP", "LIQUID", "FILM",
+})
+_FORM_ONLY_WORDS = DOSAGE_FORM_WORDS | DEVICE_TAIL_WORDS | _ROUTE_WORDS
+
+
+def _form_only(text: str) -> bool:
+    tokens = [t for t in re.split(r"[^A-Z0-9%]+", text.upper()) if t]
+    return bool(tokens) and all(t in _FORM_ONLY_WORDS or t.isdigit() for t in tokens)
 
 
 @dataclass(frozen=True)
@@ -93,7 +110,17 @@ def load_key_index(map_path: Path = DEFAULT_MAP) -> dict[str, frozenset[str]]:
 
     match.load_dictionary와 같은 기준으로 브랜드명(medicinalproduct)과 성분명(ingredient_norm)
     둘 다 키로 쓴다. 다른 점은 bool이 아니라 **어떤 성분 묶음을 가리키는지**까지 들고 있다는 것 —
-    후보끼리 성분이 갈리는지 봐야 하기 때문이다. ingredient_set의 " ; " 후보 보존(안건 B)도 풀어서 넣는다."""
+    후보끼리 성분이 갈리는지 봐야 하기 때문이다. ingredient_set의 " ; " 후보 보존(안건 B)도 풀어서 넣는다.
+
+    키 종류마다 값을 다르게 잡는 건 의도된 것이다:
+      - 제품명 키(ZOMETA, SYMBICORT) → 그 제품의 ingredient_set (복합제면 묶음 전체)
+      - 성분명 키(AMLODIPINE)        → 그 성분 하나 = normalize_ingredient(ingredient_norm).lower()
+    성분명 키에 그 행의 ingredient_set을 쓰면 안 된다 — 성분 행은 그 성분이 들어간 **제품**의 행이라,
+    AMLODIPINE이 우연히 복합제(amlodipine|hydrochlorothiazide|olmesartan medoxomil) 행에서 오면
+    "AMLODIPINE 5 MG"가 복합제로 붙는다(PR#43 리뷰에서 2단계 출력의 약 20%가 이 문제로 확인됨).
+    단일 성분 제품에서는 두 값이 같은 normalize_ingredient를 거쳐 항상 일치한다(실측 55,419행 불일치 0).
+    LEXAPRO 같은 CONFLICT는 이 차이가 아니라 소스 간 염 표기 차이(openFDA 'escitalopram oxalate' vs
+    RxNorm 'escitalopram')에서 온다 — 사전 쪽 정리 대상."""
     index = defaultdict(set)
     with open(map_path, newline="", encoding="utf-8") as f:
         for r in csv.DictReader(f):
@@ -146,7 +173,7 @@ def candidate_queries(raw: str) -> list[tuple[str, str]]:
         if m2:
             add(no_paren[:m2.start()], "drop_paren+cut")
         for inner in _PAREN.findall(s):
-            if "," not in inner:
+            if "," not in inner and not _form_only(inner):
                 add(inner, "paren_inner")
 
     if "," in no_paren:

@@ -102,11 +102,47 @@ def test_miss(index, name):
     assert renormalize.resolve(name, index).status == "MISS"
 
 
+def test_ingredient_key_maps_to_single_ingredient_not_combo_product(tmp_path):
+    """성분명 키는 그 성분 하나를 가리켜야 한다. 사전에서 그 성분 행이 복합제 제품에서 왔더라도
+    제품의 ingredient_set(묶음)을 물려받으면 안 된다(PR#43 2단계에서 실제로 난 오매칭 유형)."""
+    path = tmp_path / "map.csv"
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["medicinalproduct", "ingredient_norm", "ingredient_set", "unii",
+                    "source", "method", "confidence", "dictionary_version"])
+        combo = "amlodipine|hydrochlorothiazide|olmesartan medoxomil"
+        for ingr in ("AMLODIPINE", "HYDROCHLOROTHIAZIDE", "OLMESARTAN MEDOXOMIL"):
+            w.writerow(["TRIBENZOR", ingr, combo, "", "", "", "", ""])
+    index = renormalize.load_key_index(path)
+    assert index["AMLODIPINE"] == frozenset({"amlodipine"})
+    assert index["TRIBENZOR"] == frozenset({combo})
+    res = renormalize.resolve("AMLODIPINE 5 MG TABLET", index)
+    assert (res.status, res.ingredient_set) == ("RESOLVED", "amlodipine")
+    res = renormalize.resolve("TRIBENZOR 40/5/12.5 MG", index)
+    assert (res.status, res.ingredient_set) == ("RESOLVED", combo)
+
+
+def test_form_only_paren_is_not_a_query():
+    # "(NASAL SOLUTION)" → 정규화하면 "NASAL"만 남아 같은 이름의 엉뚱한 제품에 붙던 것
+    queries = [q for q, _ in renormalize.candidate_queries("IPRATROPIUM BROMIDE(NASAL SOLUTION) .03%")]
+    assert "NASAL" not in queries
+    assert "IPRATROPIUM" in queries
+    # 성분이 든 괄호는 그대로 후보
+    assert "ZOLEDRONIC ACID" in [q for q, _ in renormalize.candidate_queries("ZOMETA (ZOLEDRONIC ACID)")]
+
+
 def test_strength_requires_unit():
     # 숫자+단위만 용량으로 본다. COVID-19·B12 같은 이름 속 숫자에서 자르지 않는다.
     assert renormalize.STRENGTH.search("COVID-19 VACCINE") is None
     assert renormalize.STRENGTH.search("VITAMIN B12") is None
     assert renormalize.STRENGTH.search("LUPRON DEPOT 3.75 MG").group().strip() == "3.75 MG"
+    # 복합제 다중 용량은 첫 숫자부터 한 덩어리
+    assert renormalize.STRENGTH.search("TRIBENZOR 40/5/12.5 MG").group() == "40/5/12.5 MG"
+    assert renormalize.STRENGTH.search("HYCODAN 5-1.5 MG/5ML").group().startswith("5-1.5 MG")
+    # 앞 0 생략 소수, 이름·제형에 점으로 붙은 용량
+    assert renormalize.STRENGTH.search("LORAZEPAM .5 MG").group() == ".5 MG"
+    assert renormalize.STRENGTH.search("ALPRAZOLAM.25MG") is not None
+    assert renormalize.STRENGTH.search("DIGOXIN TAB.125MG") is not None
 
 
 def test_make_dict_lookup_only_resolved(tmp_path):
