@@ -145,17 +145,49 @@ def test_strength_requires_unit():
     assert renormalize.STRENGTH.search("DIGOXIN TAB.125MG") is not None
 
 
-def test_make_dict_lookup_only_resolved(tmp_path):
-    # triage.load_dict_lookup 자리에 꽂는 name→bool: RESOLVED만 True, CONFLICT는 False(UNKNOWN에 남음)
-    path = tmp_path / "map.csv"
+def _write_map(path, rows, version=renormalize.DICTIONARY_VERSION):
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["medicinalproduct", "ingredient_norm", "ingredient_set", "unii",
                     "source", "method", "confidence", "dictionary_version"])
-        w.writerow(["HUMIRA", "ADALIMUMAB", "adalimumab", "", "", "", "", ""])
-        w.writerow(["LEXAPRO", "ESCITALOPRAM", "escitalopram", "", "", "", "", ""])
-        w.writerow(["ESCITALOPRAM OXALATE", "ESCITALOPRAM OXALATE", "escitalopram oxalate", "", "", "", "", ""])
+        for p, i, s in rows:
+            w.writerow([p, i, s, "", "", "", "", version])
+
+
+def test_make_dict_lookup_only_resolved(tmp_path):
+    # triage.load_dict_lookup 자리에 꽂는 name→bool: RESOLVED만 True, CONFLICT는 False(UNKNOWN에 남음)
+    path = tmp_path / "map.csv"
+    _write_map(path, [("HUMIRA", "ADALIMUMAB", "adalimumab"),
+                      ("LEXAPRO", "ESCITALOPRAM", "escitalopram"),
+                      ("ESCITALOPRAM OXALATE", "ESCITALOPRAM OXALATE", "escitalopram oxalate")])
     lookup = renormalize.make_dict_lookup(path)
     assert lookup("HUMIRA 40 MG/0.8 ML PEN") is True
     assert lookup("LEXAPRO (ESCITALOPRAM OXALATE)") is False
     assert lookup("NOT A DRUG") is False
+
+
+# --- 사전 위치·버전 검사 (팀 합의: silver/drug_dict/drug_ingredient_map.csv) ---------------
+def test_default_map_path_is_silver_drug_dict():
+    assert renormalize.DEFAULT_MAP == DRUG_DICT / "drug_ingredient_map.csv"
+
+
+def test_missing_map_raises(tmp_path):
+    with pytest.raises(FileNotFoundError, match="drug_ingredient_map.csv"):
+        renormalize.make_dict_lookup(tmp_path / "nope.csv")
+
+
+@pytest.mark.parametrize("version", ["d-2025Q1", ""])
+def test_stale_or_unversioned_map_raises(tmp_path, version):
+    path = tmp_path / "map.csv"
+    _write_map(path, [("HUMIRA", "ADALIMUMAB", "adalimumab")], version=version)
+    with pytest.raises(ValueError, match="사전 버전 불일치"):
+        renormalize.make_dict_lookup(path)
+
+
+def test_mixed_versions_raise(tmp_path):
+    path = tmp_path / "map.csv"
+    _write_map(path, [("HUMIRA", "ADALIMUMAB", "adalimumab")])
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerow(["ZOMETA", "ZOLEDRONIC ACID", "zoledronic acid", "", "", "", "", "d-2025Q1"])
+    with pytest.raises(ValueError, match="d-2025Q1"):
+        renormalize.check_map(path)

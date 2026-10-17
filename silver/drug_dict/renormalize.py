@@ -35,9 +35,13 @@ precision 우선 (2단계 similarity.py와 같은 원칙) — 잘못 붙이면 B
 triage 연결: make_dict_lookup()은 triage.load_dict_lookup()과 같은 name→bool 함수를 돌려준다.
 triage의 BRAND_DOSE 판정에 그대로 꽂으면 된다.
 
+사전 위치: silver/drug_dict/drug_ingredient_map.csv (팀 합의 경로 — match.py·build_map.py·similarity.py와 동일).
+gitignore라 GitHub Release(dict-*)에서 받아 이 위치에 둔다. 파일이 없거나 dictionary_version이
+build_map.DICTIONARY_VERSION과 다르면 에러로 멈춘다(존재만 보면 옛 사전으로 조용히 돌 수 있어서).
+
 실행:
-  python3 renormalize.py out/unmatched_for_stage3.csv
-  python3 renormalize.py out/unmatched_for_stage3.csv --map out/drug_ingredient_map.csv \\
+  python3 renormalize.py silver/drug_dict/unmatched_for_stage3.csv
+  python3 renormalize.py silver/drug_dict/unmatched_for_stage3.csv \\
           --out-resolved-csv out/brand_dose_resolved.csv --out-conflict-csv out/brand_dose_conflict.csv
 """
 import argparse
@@ -51,9 +55,9 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 from normalize import normalize_query, DOSAGE_FORM_WORDS
-from build_map import normalize_ingredient
+from build_map import DICTIONARY_VERSION, normalize_ingredient
 
-DEFAULT_MAP = HERE.parent.parent / "out" / "drug_ingredient_map.csv"
+DEFAULT_MAP = HERE / "drug_ingredient_map.csv"
 
 # 숫자+단위 = 용량/농도 표기. 이 지점부터 뒤는 전부 용량·제형·기기 설명이라 통째로 자른다.
 # 앞이 영문자인 숫자(PD4·B12·T4)는 제품명/지정자일 수 있어 제외한다.
@@ -261,9 +265,26 @@ def resolve(raw: str, index: dict[str, frozenset[str]]) -> Resolution:
     return Resolution("RESOLVED", ingredient_set=next(iter(sets)), matched_key=q, rule=rule)
 
 
+def check_map(map_path: Path, expected_version: str = DICTIONARY_VERSION) -> None:
+    """사전 파일이 있고 현재 코드가 기대하는 버전인지 확인한다. 아니면 이유와 함께 멈춘다."""
+    if not map_path.exists():
+        raise FileNotFoundError(
+            f"사전 파일 없음: {map_path}\n"
+            f"GitHub Release(dict-*)의 drug_ingredient_map.csv를 받아 {DEFAULT_MAP} 에 두거나 --map으로 지정")
+    with open(map_path, newline="", encoding="utf-8") as f:
+        versions = Counter(r.get("dictionary_version", "") for r in csv.DictReader(f))
+    if set(versions) != {expected_version}:
+        found = ", ".join(f"{v or '(빈값)'} {n:,}행" for v, n in versions.most_common())
+        raise ValueError(
+            f"사전 버전 불일치: {map_path}\n"
+            f"  기대 {expected_version} (build_map.DICTIONARY_VERSION) / 파일 {found}\n"
+            f"  최신 Release의 사전으로 교체할 것")
+
+
 def make_dict_lookup(map_path: Path = DEFAULT_MAP):
     """triage.load_dict_lookup 대체용 name→bool. RESOLVED만 True(=BRAND_DOSE).
     CONFLICT는 False라 triage에서 UNKNOWN(LLM 대상)에 남는다."""
+    check_map(map_path)
     index = load_key_index(map_path)
     return lambda name: resolve(name, index).status == "RESOLVED"
 
@@ -285,12 +306,13 @@ def load_rows(path: Path) -> list[tuple[str, int]]:
 
 def main():
     ap = argparse.ArgumentParser(description="브랜드+용량 재정규화 → 사전 재조회 (BRAND_DOSE)")
-    ap.add_argument("input", type=Path, help="잔여 CSV (name,n_reports) — out/unmatched_for_stage3.csv 등")
-    ap.add_argument("--map", type=Path, default=DEFAULT_MAP, help="사전 CSV (drug_ingredient_map.csv)")
+    ap.add_argument("input", type=Path, help="잔여 CSV (name,n_reports) — silver/drug_dict/unmatched_for_stage3.csv 등")
+    ap.add_argument("--map", type=Path, default=DEFAULT_MAP, help=f"사전 CSV (기본 {DEFAULT_MAP})")
     ap.add_argument("--out-resolved-csv", type=Path, help="RESOLVED만 저장 (name,n_reports,matched_key,rule,ingredient_set)")
     ap.add_argument("--out-conflict-csv", type=Path, help="CONFLICT만 저장 (감사용)")
     args = ap.parse_args()
 
+    check_map(args.map)
     index = load_key_index(args.map)
     rows = load_rows(args.input)
     total_reports = sum(n for _, n in rows)
