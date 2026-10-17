@@ -47,7 +47,7 @@ contracts/dbt/
 │  ├─ stg_reaction_dict.sql         # [부작용] contract enforced (signal_term/pt_set_id 통일)
 │  └─ schema.yml                    # ★ 계약: 컬럼 타입·제약·테스트
 └─ tests/                           # 형식 계약(단일 테스트)
-   ├─ assert_resolved_ingredient_set_format.sql   # [성분] 소문자·공백없음
+   ├─ assert_resolved_ingredient_set_format.sql   # [성분] 소문자·파이프 경계 공백없음
    ├─ assert_ingredient_set_sorted.sql            # [성분] 알파벳 정렬
    ├─ assert_unii_length.sql                       # [성분] 10자 또는 빈값
    ├─ assert_resolved_has_ingredient.sql          # [성분] 확정/수기면 성분 필수
@@ -95,6 +95,7 @@ seed에서 한 값을 일부러 어긋내고 다시 `dbt build`:
 |---|---|---|
 | 성분 | `H1250JIK0A` → `H1250JIK0` (UNII 9자) | `assert_unii_length` FAIL |
 | 성분 | `carbidopa\|levodopa` → `Carbidopa\|Levodopa` (대문자) | `assert_resolved_ingredient_set_format` FAIL |
+| 성분 | `carbidopa\|levodopa` → `carbidopa \| levodopa` (파이프 옆 공백) | `assert_resolved_ingredient_set_format` FAIL |
 | 성분 | `carbidopa\|levodopa` → `levodopa\|carbidopa` (순서) | `assert_ingredient_set_sorted` FAIL |
 | 성분 | `확정` 행의 성분셋을 비움 | `assert_resolved_has_ingredient` FAIL |
 | 성분 | `resolution_status`에 `대기` 같은 값 | `accepted_values` FAIL |
@@ -108,7 +109,7 @@ seed에서 한 값을 일부러 어긋내고 다시 `dbt build`:
 
 **성분 (stg_resolution / stg_candidate)**
 - 타입·제약: `entity_id` not_null+unique(약이름당 1행), `resolution_status` not_null + 4개 값만(accepted_values).
-- 형식(tests/): 성분셋 소문자·공백없음·정렬, UNII 10자, 확정이면 성분 필수.
+- 형식(tests/): 성분셋 소문자·파이프 경계 공백없음(조각 안의 공백은 허용, 예: `zoledronic acid`)·정렬, UNII 10자, 확정이면 성분 필수.
 - 다리 무결성: 모든 Candidate.`entity_id`는 Resolution에 존재(relationships).
 
 **부작용 (stg_reaction_dict)**

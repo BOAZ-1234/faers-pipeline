@@ -5,3 +5,5 @@ e003,SINEMET,확정,carbidopa|levodopa,,1,dictionary,0.95,v0.1,dict-2026Q1
 e004,ZYRTEC-D,확정,cetirizine|pseudoephedrine,,2,fuzzy,0.82,v0.1,dict-2026Q1
 e005,XYZQ MISSPELL,미해결,,,3,,0.0,v0.1,dict-2026Q1
 e006,TYLENOL PM,보류,acetaminophen|diphenhydramine,,3,llm,0.6,v0.1,dict-2026Q1
+e007,ZOMETA,확정,zoledronic acid,,1,dictionary,1.0,v0.1,dict-2026Q1
+e008,LANTUS,확정,insulin glargine,,1,dictionary,1.0,v0.1,dict-2026Q1
