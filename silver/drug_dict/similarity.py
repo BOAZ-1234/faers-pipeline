@@ -39,7 +39,7 @@ from rapidfuzz import fuzz, process
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 from normalize import normalize_query
-from build_map import DICTIONARY_VERSION
+from build_map import DICTIONARY_VERSION, normalize_ingredient
 
 DEFAULT_MAP = HERE / "drug_ingredient_map.csv"
 
@@ -102,10 +102,23 @@ class Candidates:
     def canonical(self, cand: str) -> tuple[dict, bool]:
         """후보 문자열 → (대표 canonical 행, ambiguous 여부).
         같은 문자열이 서로 다른 ingredient_norm으로 등록돼 있으면 ambiguous(브랜드
-        하나가 성분 여러 개로 매핑되는 등) — 대표는 첫 행, 플래그를 세워 하류에 알린다."""
+        하나가 성분 여러 개로 매핑되는 등) — 대표는 첫 행, 플래그를 세워 하류에 알린다.
+
+        성분명(match_field="ingredient")으로 매칭된 후보는 대표행이 그 성분을 '포함한'
+        복합제 제품행일 수 있다. 그 행의 ingredient_set은 조합 전체(예: amlodipine|
+        hydrochlorothiazide|olmesartan)라, 입력이 성분 하나(HYDROCHLOROTIAZID)인데도
+        복합제 묶음이 B·D 조인키로 그대로 나가 집계를 조용히 오염시킨다(PR #43 리뷰).
+        매칭된 건 단일 성분이므로 ingredient_set을 그 성분 하나로 덮고(사전의 단일제와
+        동일한 normalize_ingredient().lower() 포맷), UNII도 성분행에서 취한다."""
         rows = self.records[cand]
         distinct = {r["ingredient_norm"] for r in rows}
-        return rows[0], len(distinct) > 1
+        rep = dict(rows[0])  # 저장된 레코드를 건드리지 않도록 복사본에 쓴다
+        if rep["match_field"] == "ingredient":
+            rep["ingredient_set"] = normalize_ingredient(rep["ingredient_norm"]).lower()
+            ing_uniis = [r["unii"] for r in rows
+                         if r["match_field"] == "ingredient" and r["unii"].strip()]
+            rep["unii"] = ing_uniis[0] if ing_uniis else ""
+        return rep, len(distinct) > 1
 
 
 def load_candidates(map_path: Path = DEFAULT_MAP) -> Candidates:
@@ -256,6 +269,7 @@ def run_match(miss_path, out_path, map_path, scorer_name, threshold, limit, marg
 
     n_matched = n_ambiguous = n_low_margin = n_short_reject = 0
     n_variant_reject = n_ambiguous_held = n_degenerate = n_class_reject = 0
+    n_multiset_held = 0
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=OUT_FIELDS)
         w.writeheader()
@@ -294,6 +308,12 @@ def run_match(miss_path, out_path, map_path, scorer_name, threshold, limit, marg
             if rec["ingredient_norm"].strip().upper() in DEGENERATE_TARGETS:
                 n_degenerate += 1
                 continue
+            # ingredient_set이 " ; "를 품은 경우: build_map이 소스 간 충돌을 해소하지 않고
+            # 복수 후보를 보존한 값(안건 B, 예: "insulin lispro|water ; insulin lispro")이라
+            # 단일 조인키로 쓸 수 없다. 어느 쪽인지 애매하므로 채택하지 않고 보류→3단계.
+            if " ; " in rec["ingredient_set"]:
+                n_multiset_held += 1
+                continue
             # 후보가 복합제라 성분이 여럿(ambiguous)이면 단일 성분으로 우기지 않고
             # 보류→3단계(precision 우선). --keep-ambiguous면 종전대로 대표성분 채택.
             if ambiguous and not keep_ambiguous:
@@ -318,7 +338,8 @@ def run_match(miss_path, out_path, map_path, scorer_name, threshold, limit, marg
     print(f"채택 {n_matched:,}개 (scorer={scorer_name}, ambiguous {n_ambiguous:,}개)", flush=True)
     print(f"  보류/기각 → 마진<{margin}: {n_low_margin:,} / 짧은이름: {n_short_reject:,} / "
           f"번호변형불일치: {n_variant_reject:,} / 복합제(ambiguous): {n_ambiguous_held:,} / "
-          f"불량stub: {n_degenerate:,} / class·제형만: {n_class_reject:,}", flush=True)
+          f"불량stub: {n_degenerate:,} / class·제형만: {n_class_reject:,} / "
+          f"다중후보set(';'): {n_multiset_held:,}", flush=True)
     print(f"→ {out_path}", flush=True)
 
 

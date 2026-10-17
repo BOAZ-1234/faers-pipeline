@@ -50,6 +50,16 @@ def synthetic_map(tmp_path):
             ("COMBOCARE", "DRUGB", "druga|drugb", "", "test", "사전", "", "d-test"),
             # 정규화로 염이 떨어져 남는 조각 stub → 불량 stub 거부 검증용
             ("DIMETHYL", "DIMETHYL", "dimethyl", "", "test", "사전", "", "d-test"),
+            # 복합제 제품행 — 성분명 후보 "HYDROCHLOROTHIAZIDE"의 대표행(rows[0])이
+            # 이 조합행이 되어, 성분 하나로 매칭돼도 ingredient_set이 조합 전체로
+            # 새나가던 버그(PR #43 🔴) 재현·수정 검증용. UNII는 그 성분행 값.
+            ("AMLOHCTZ OLM", "HYDROCHLOROTHIAZIDE",
+             "amlodipine|hydrochlorothiazide|olmesartan medoxomil", "0J48LPH2TH",
+             "test", "사전", "", "d-test"),
+            # ingredient_set이 소스충돌 보존값(" ; ")인 제품 — 단일 조인키로 못 써
+            # 보류되어야 함(PR #43 🟡 ';' 가드) 검증용.
+            ("INSUPROD", "INSULIN LISPRO",
+             "insulin lispro|water ; insulin lispro", "", "test", "사전", "", "d-test"),
         ],
     )
     return path
@@ -184,6 +194,33 @@ def test_degenerate_stub_rejected(synthetic_map, tmp_path):
     ('DIMETHYL FUMARATE'는 normalize에서 FUMARATE가 떨어져 'DIMETHYL'이 됨.)"""
     res = _match_map(synthetic_map, tmp_path, [("DIMETHYL FUMARATE", 100)], threshold=88.0)
     assert "DIMETHYL FUMARATE" not in res
+
+
+def test_ingredient_match_outputs_single_ingredient_set(synthetic_map, tmp_path):
+    """성분명 후보에 매칭되면 ingredient_set은 그 성분 하나여야 한다(PR #43 🔴).
+    사전의 "HYDROCHLOROTHIAZIDE" 성분 후보는 복합제 제품행에서 왔고 그 행의
+    ingredient_set은 조합 전체다. 수정 전이라면 입력 'HYDROCHLOROTIAZID'(단일 성분
+    오타)가 'amlodipine|hydrochlorothiazide|olmesartan medoxomil' 묶음으로 나가
+    B·D 조인키를 오염시켰다. 수정 후엔 단일 성분 set만 나가야 한다."""
+    res = _match_map(synthetic_map, tmp_path, [("HYDROCHLOROTIAZID", 300)],
+                     threshold=90.0)
+    row = res["HYDROCHLOROTIAZID"]
+    assert row["match_field"] == "ingredient"
+    assert row["ingredient_norm"] == "HYDROCHLOROTHIAZIDE"
+    # 핵심: 복합제 조합이 아니라 단일 성분(사전 단일제와 동일 포맷)
+    assert row["ingredient_set"] == "hydrochlorothiazide"
+    assert "amlodipine" not in row["ingredient_set"]
+    assert "|" not in row["ingredient_set"]
+    # UNII도 그 성분행 값에서(제품행이 아니라)
+    assert row["unii"] == "0J48LPH2TH"
+
+
+def test_multi_candidate_ingredient_set_held(synthetic_map, tmp_path):
+    """ingredient_set이 소스충돌 보존값(' ; ')이면 단일 조인키로 못 써 보류(PR #43 🟡).
+    제품 'INSUPROD'는 ingredient_set='insulin lispro|water ; insulin lispro'라
+    어느 후보 묶음인지 애매 → 채택하지 않고 3단계로."""
+    res = _match_map(synthetic_map, tmp_path, [("INSUPROD", 80)], threshold=90.0)
+    assert "INSUPROD" not in res
 
 
 def test_output_carries_dictionary_version(synthetic_map, tmp_path):
