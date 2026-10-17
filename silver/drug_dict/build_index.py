@@ -50,7 +50,7 @@ sys.path.insert(0, str(HERE))
 from normalize import normalize_query  # Stage 0과 동일 정규화
 from build_map import DICTIONARY_VERSION
 
-MAP_DEFAULT = HERE.parent.parent / "silver" / "reaction_dict" / "output" / "drug_ingredient_map.csv"
+MAP_DEFAULT = HERE / "drug_ingredient_map.csv"
 OUT_DIR = HERE / "output"
 
 MODEL_IDS = {
@@ -176,6 +176,15 @@ def main() -> None:
 
     if not args.map.exists():
         sys.exit(f"오류: {args.map} 없음")
+
+    # 파일의 dictionary_version이 현재 DICTIONARY_VERSION과 일치하는지 확인
+    with open(args.map, newline="", encoding="utf-8") as _f:
+        _row = next(csv.DictReader(_f), None)
+    if _row and _row.get("dictionary_version") and _row["dictionary_version"] != DICTIONARY_VERSION:
+        sys.exit(
+            f"오류: 사전 버전 불일치 — 파일={_row['dictionary_version']}, "
+            f"코드={DICTIONARY_VERSION}. 올바른 사전 파일을 사용하세요."
+        )
 
     build(args.map, args.model, args.out_dir)
 

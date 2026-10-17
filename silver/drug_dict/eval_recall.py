@@ -30,7 +30,7 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
-UNMATCHED_DEFAULT = HERE.parent.parent / "silver" / "reaction_dict" / "output" / "unmatched_for_stage3.csv"
+UNMATCHED_DEFAULT = HERE / "unmatched_for_stage3.csv"
 DEV_DEFAULT = HERE / "golden" / "output" / "diana_golden_dev.csv"
 KS = [1, 5, 10, 20]
 
