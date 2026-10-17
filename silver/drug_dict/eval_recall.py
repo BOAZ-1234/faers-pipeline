@@ -118,7 +118,7 @@ def main() -> None:
     ap.add_argument("--dev", type=Path, default=DEV_DEFAULT, help="diana_golden_dev.csv")
     ap.add_argument("--model", choices=list(MODEL_IDS), default="e5")
     ap.add_argument("--out-csv", type=Path, help="결과 CSV 저장 경로 (선택)")
-    ap.add_argument("--unmatched", type=Path, default=None,
+    ap.add_argument("--unmatched", type=Path, default=UNMATCHED_DEFAULT,
                     help="unmatched_for_stage3.csv — 이 파일의 name과 겹치는 dev 쿼리만 평가 "
                          "(§9 leakage 방지: Stage 1/2가 이미 처리한 쿼리 제외)")
     args = ap.parse_args()
