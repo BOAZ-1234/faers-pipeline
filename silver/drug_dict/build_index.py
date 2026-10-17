@@ -48,6 +48,7 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 from normalize import normalize_query  # Stage 0과 동일 정규화
+from build_map import DICTIONARY_VERSION
 
 MAP_DEFAULT = HERE.parent.parent / "silver" / "reaction_dict" / "output" / "drug_ingredient_map.csv"
 OUT_DIR = HERE / "output"
@@ -149,7 +150,7 @@ def build(map_path: Path, model_key: str, out_dir: Path) -> None:
     # §7 재현성: corpus 첫 줄은 __meta__ — Langfuse trace의 retrieval_version 등과 대응
     meta = {
         "__meta__": True,
-        "dictionary_version": "d-2026Q3",   # build_map.py DICTIONARY_VERSION과 동기화
+        "dictionary_version": DICTIONARY_VERSION,   # build_map.py에서 import
         "embedding_model": MODEL_IDS[model_key],
         "retrieval_version": f"r-{model_key}-v1",
         "alias_count": len(rows),

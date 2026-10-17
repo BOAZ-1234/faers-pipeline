@@ -97,7 +97,7 @@ def recall_at_k(
     hits = {k: 0 for k in KS}
     for i, qname in enumerate(queries):
         expected = gold[qname]  # set of ingredient_norm
-        top_isets = [corpus[idx]["ingredient_set"] for idx in indices[i]]
+        top_isets = [corpus[idx]["ingredient_set"] for idx in indices[i] if idx != -1]
 
         for k in KS:
             candidate_ingrs: set[str] = set()
