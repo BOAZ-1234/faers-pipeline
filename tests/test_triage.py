@@ -15,6 +15,7 @@ if str(DRUG_DICT) not in sys.path:
     sys.path.insert(0, str(DRUG_DICT))
 
 triage = pytest.importorskip("triage", reason="rapidfuzz 필요 (pip install rapidfuzz)")
+from build_map import DICTIONARY_VERSION  # BRAND_DOSE 사전 fixture의 버전 검사(#55 check_map)용
 
 
 # --- OUT_OF_SCOPE로 제외돼야 하는 것 (붙일 성분 자체가 없음) ---
@@ -74,8 +75,9 @@ def synthetic_dict_map(tmp_path):
         w = csv.writer(f)
         w.writerow(["medicinalproduct", "ingredient_norm", "ingredient_set", "unii",
                     "source", "method", "confidence", "dictionary_version"])
-        w.writerow(["HUMIRA", "ADALIMUMAB", "adalimumab", "", "t", "사전", "", "d-test"])
-        w.writerow(["ASPIRIN", "ASPIRIN", "aspirin", "", "t", "사전", "", "d-test"])
+        # dictionary_version은 build_map.DICTIONARY_VERSION과 맞춰야 renormalize.check_map(#55)을 통과.
+        w.writerow(["HUMIRA", "ADALIMUMAB", "adalimumab", "", "t", "사전", "", DICTIONARY_VERSION])
+        w.writerow(["ASPIRIN", "ASPIRIN", "aspirin", "", "t", "사전", "", DICTIONARY_VERSION])
     return p
 
 

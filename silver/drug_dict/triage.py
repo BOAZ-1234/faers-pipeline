@@ -226,8 +226,9 @@ def write_curve_csv(path: Path, curve):
 def main():
     ap = argparse.ArgumentParser(description="3단계 전 잔여 triage + 규모 산정")
     ap.add_argument("input", type=Path, help="잔여 CSV (name,n_reports) — out/unmatched_for_stage3.csv")
-    ap.add_argument("--map", type=Path, default=HERE.parent.parent / "out" / "drug_ingredient_map.csv",
-                    help="사전 CSV 경로 (BRAND_DOSE 재조회용, 없으면 BRAND_DOSE 비활성화)")
+    ap.add_argument("--map", type=Path, default=HERE / "drug_ingredient_map.csv",
+                    help="사전 CSV 경로 (BRAND_DOSE 재조회용, 없으면 BRAND_DOSE 비활성화). "
+                         "기본값은 #55가 통일한 build_map 생산 위치(silver/drug_dict/)")
     ap.add_argument("--out-unknown-csv", type=Path, help="UNKNOWN 버킷(진짜 LLM 대상)만 저장")
     ap.add_argument("--out-oos-csv", type=Path, help="OUT_OF_SCOPE 버킷 저장(감사용)")
     ap.add_argument("--out-curve-csv", type=Path, help="UNKNOWN 빈도 컷오프 곡선 저장")
