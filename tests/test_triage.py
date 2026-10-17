@@ -65,6 +65,33 @@ def test_protected(name):
     assert triage.out_of_scope_reason(name) is None
 
 
+@pytest.fixture
+def synthetic_dict_map(tmp_path):
+    """build_map.py 출력 스키마의 작은 사전 (BRAND_DOSE 재조회용)."""
+    import csv
+    p = tmp_path / "map.csv"
+    with open(p, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["medicinalproduct", "ingredient_norm", "ingredient_set", "unii",
+                    "source", "method", "confidence", "dictionary_version"])
+        w.writerow(["HUMIRA", "ADALIMUMAB", "adalimumab", "", "t", "사전", "", "d-test"])
+        w.writerow(["ASPIRIN", "ASPIRIN", "aspirin", "", "t", "사전", "", "d-test"])
+    return p
+
+
+def test_brand_dose_routed_via_renormalize(synthetic_dict_map):
+    """triage의 BRAND_DOSE가 renormalize.make_dict_lookup에 배선됐는지(#50 연결).
+    'HUMIRA 40 MG/0.8 ML PEN'은 1단계 normalize로는 안 잡히지만(끝 토큰만 떼다 멈춤)
+    renormalize가 용량 뒤 기기명까지 잘라 HUMIRA로 재조회 → BRAND_DOSE. 옛 평이 재조회
+    였다면 0이 나와 UNKNOWN(=Z, LLM 대상)으로 샜다."""
+    lookup = triage.make_dict_lookup(synthetic_dict_map)
+    rows = [("HUMIRA 40 MG/0.8 ML PEN", 300), ("ZZZQ NONEXISTENT", 10), ("EYE DROPS", 40)]
+    buckets, _ = triage.triage(rows, lookup)
+    assert [n for n, _ in buckets["BRAND_DOSE"]] == ["HUMIRA 40 MG/0.8 ML PEN"]
+    assert ("ZZZQ NONEXISTENT", 10) in buckets["UNKNOWN"]       # 미지 → LLM 대상
+    assert ("EYE DROPS", 40) in buckets["OUT_OF_SCOPE"]         # class/form은 그대로
+
+
 def test_cutoff_curve_monotonic():
     """컷오프가 커지면 LLM 호출 수·커버 신고는 단조 감소해야 한다."""
     unknown = [("A", 1), ("B", 2), ("C", 5), ("D", 50)]

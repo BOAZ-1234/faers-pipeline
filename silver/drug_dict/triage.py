@@ -11,7 +11,8 @@ C단계 3단계 전처리 — 잔여 triage + 규모 산정 (게이팅 역할, �
   OUT_OF_SCOPE : class/미상/NOS/비약물 — 붙일 성분 자체가 없음. LLM 보낼 가치 없음.
                  근거 = normalize.py PROD_AI_EXCLUDE·_NOS_PATTERN + similarity.py class_or_form_only.
                  (지금까지 이 가드들은 prod_ai/2단계 안에서만 돌아 drugname 잔여엔 그대로 남아 있었음.)
-  BRAND_DOSE   : 브랜드+용량/제형. 재정규화→1단계 사전 재조회가 되면 LLM 없이 해결 가능.
+  BRAND_DOSE   : 브랜드+용량/제형. renormalize.py(#50)의 브랜드+용량 재정규화로 1단계 사전을
+                 다시 찾아 RESOLVED면 여기로 — LLM 없이 해결 가능(CONFLICT는 UNKNOWN에 남김).
                  사전(drug_ingredient_map.csv)이 로컬에 있어야 측정됨(gitignore).
   UNKNOWN      : 진짜 미지 브랜드·복합제·orphan — 이것만 3단계(embedding+LLM) 대상.
 
@@ -36,6 +37,7 @@ sys.path.insert(0, str(HERE))
 
 from normalize import normalize_query, PROD_AI_EXCLUDE, _NOS_PATTERN
 from similarity import class_or_form_only
+from renormalize import make_dict_lookup
 
 # 빈도 컷오프 곡선에 찍을 "신고 ≥N건" 지점들. "신고 몇 건 이상만 LLM에 태우나"의 후보.
 CUTOFFS = [1, 2, 3, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
@@ -149,28 +151,6 @@ def is_out_of_scope(name: str) -> bool:
     return out_of_scope_reason(name) is not None
 
 
-def load_dict_lookup(map_path: Path):
-    """주어진 사전 경로에서 (브랜드·성분·조합) 집합을 만들어 lookup 함수(name->bool)를 반환.
-    match.load_dictionary는 경로가 silver/drug_dict/로 하드코딩돼 있어 재사용 못 하므로,
-    같은 로딩 로직을 여기서 임의 경로로 수행한다. 매칭 로직(match.lookup)은 그대로 재사용."""
-    from match import lookup  # 매칭 로직은 공유
-    products, ingredients, known_combos = set(), set(), set()
-    with open(map_path, newline="", encoding="utf-8") as f:
-        for r in csv.DictReader(f):
-            p = r["medicinalproduct"].strip().upper()
-            i = r["ingredient_norm"].strip().upper()
-            if p:
-                products.add(p)
-            if i:
-                ingredients.add(i)
-            for cand in r["ingredient_set"].split(" ; "):
-                cand = cand.strip()
-                if cand:
-                    known_combos.add(cand)
-    print(f"  사전: 브랜드 {len(products):,} / 성분 {len(ingredients):,} / 조합 {len(known_combos):,}")
-    return lambda name: lookup(name, products, ingredients, known_combos)
-
-
 def triage(rows, dict_lookup):
     """각 (name, n)을 OUT_OF_SCOPE / BRAND_DOSE / UNKNOWN 으로 분류.
     dict_lookup이 None이면 BRAND_DOSE 판정을 건너뛰고 UNKNOWN으로 보낸다.
@@ -259,8 +239,12 @@ def main():
     print(f"입력: {total_names:,} 고유명 / 신고합 {total_reports:,}")
 
     if args.map.exists():
-        print(f"사전 로드: {args.map}")
-        dict_lookup = load_dict_lookup(args.map)
+        print(f"사전 로드: {args.map} (BRAND_DOSE 판정 = renormalize 브랜드+용량 재정규화 재조회)")
+        # BRAND_DOSE는 #50 renormalize.make_dict_lookup으로 판정한다. 잔여는 1단계와 같은
+        # normalize_query로 이미 실패한 이름들이라 평이 재조회(옛 load_dict_lookup)는 0이 나온다.
+        # renormalize는 끝 토큰만 떼다 멈추던 용량 뒤 기기명·괄호 등을 더 잘라 재조회해 실제로
+        # 해결되는 브랜드+용량을 BRAND_DOSE로 빼낸다(그만큼 UNKNOWN=Z·LLM 호출이 줄어든다).
+        dict_lookup = make_dict_lookup(args.map)
     else:
         print(f"[주의] 사전 없음({args.map}) → BRAND_DOSE 비활성화, UNKNOWN에 합산됨.")
         print("    BRAND_DOSE 실수치는 사전이 있는 환경에서 --map 으로 다시 실행.")
