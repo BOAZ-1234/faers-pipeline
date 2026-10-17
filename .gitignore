@@ -28,6 +28,11 @@ out/
 *.duckdb.wal
 bronze/verification/*.json
 
+# Stage 3 임베딩 산출물 (faiss 인덱스·corpus·recall csv — 재생성 가능, 대용량)
+silver/drug_dict/output/
+# humanize 윤문 작업물
+_workspace/
+
 # 새 폴더 구조로 정리 중 — 기존 폴더 전부 임시 ignore
 samples/
 

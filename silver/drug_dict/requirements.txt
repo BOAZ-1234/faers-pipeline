@@ -1,0 +1,10 @@
+# Stage 3-A (임베딩 검색 + Recall@K + Langfuse) 의존성
+# build_index.py / eval_recall.py / langfuse_tracer.py
+
+faiss-cpu>=1.8,<2
+sentence-transformers>=2.7,<6
+
+# langfuse는 반드시 3.x. 4.x는 OTel API가 바뀌어(start_as_current_span 제거)
+# langfuse_tracer.py의 trace() 호출이 깨진다. Cloud v4는 OTel 수집 경로만
+# 실시간 반영하므로 2.x(ingestion API)도 쓰지 않는다.
+langfuse>=3,<4
