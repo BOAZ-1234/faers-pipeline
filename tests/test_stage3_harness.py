@@ -277,3 +277,228 @@ def test_cli_run_and_finalize(tmp_path):
     rows = _read_csv(tmp_path / "final" / "resolution.csv")
     assert len(rows) == 4  # 신고 ≥20 → 6개 entity 중 앞 4개
     assert rows[0]["pipeline_version"] == h.PIPELINE_VERSION
+
+
+# ── 실제 후보 소스 (#59) ───────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("alias,iset,expected", [
+    # 성분명 별칭이 복합제 묶음을 달고 있으면 그 성분 하나로 (#47 corpus·#43과 같은 문제)
+    ("AMLODIPINE", "amlodipine|hydrochlorothiazide|olmesartan medoxomil", "amlodipine"),
+    ("OXYCODONE HYDROCHLORIDE", "acetaminophen|oxycodone", "oxycodone"),   # 염 접미사 떼고 원소면 성분
+    ("SYMBICORT", "budesonide|formoterol", "budesonide|formoterol"),       # 브랜드는 묶음 유지
+    ("ZOMETA", "zoledronic acid", "zoledronic acid"),                      # 단일제는 그대로
+])
+def test_collapse_ingredient_alias(alias, iset, expected):
+    assert h.collapse_ingredient_alias(alias, iset) == expected
+
+
+class _FakeModel:
+    def __init__(self):
+        self.calls = []
+
+    def encode(self, texts, **kw):
+        self.calls.append(list(texts))
+        return [[1.0] for _ in texts]
+
+
+class _FakeIndex:
+    """검색 결과를 미리 정해 둔 FAISS 대역. 행 = 질의, 열 = search_k."""
+    def __init__(self, ntotal, ids, scores):
+        self.ntotal, self._ids, self._scores = ntotal, ids, scores
+
+    def search(self, vecs, k):
+        return [self._scores] * len(vecs), [self._ids] * len(vecs)
+
+
+CORPUS = [{"alias": "AMLODIPINE", "ingredient_set": "amlodipine|hydrochlorothiazide|olmesartan medoxomil"},
+          {"alias": "NORVASC", "ingredient_set": "amlodipine"},
+          {"alias": "SYMBICORT", "ingredient_set": "budesonide|formoterol"}]
+META = {"dictionary_version": h.DICTIONARY_VERSION, "retrieval_version": "r-test-v1",
+        "embedding_model": "cambridgeltl/SapBERT-from-PubMedBERT-fulltext"}
+
+
+def test_faiss_source_maps_hits_collapses_and_skips_padding():
+    idx = _FakeIndex(3, ids=[0, 1, 2, -1], scores=[0.9, 0.8, 0.5, 0.0])  # -1 = FAISS 패딩
+    src = h.FaissSource(idx, CORPUS, META, _FakeModel(), search_k=4)
+    cands = src.candidates("AMLODIPNE")
+    assert [c.alias for c in cands] == ["AMLODIPINE", "NORVASC", "SYMBICORT"]
+    assert cands[0].ingredient_set == "amlodipine"            # 복합제 묶음 → 성분 하나
+    assert cands[0].semantic_score == 0.9 and cands[0].source == "faiss"
+    assert src.retrieval_version == "r-test-v1" and src.prefix == ""
+    # 합치면 NORVASC와 같은 성분이라 하나로 접힌다
+    assert [c.ingredient_set for c in h.union_candidates([cands], 10)] == ["amlodipine", "budesonide|formoterol"]
+
+
+def test_faiss_source_prefetch_batches_and_e5_prefix():
+    model = _FakeModel()
+    meta = dict(META, embedding_model="intfloat/multilingual-e5-small")
+    src = h.FaissSource(_FakeIndex(3, [1], [0.7]), CORPUS, meta, model, search_k=1)
+    src.prefetch(["A", "B", "A"])
+    assert model.calls == [["query: A", "query: B"]]          # 중복 제거·한 번에 임베딩, e5는 query: 접두
+    src.candidates("A")
+    src.candidates("B")
+    assert len(model.calls) == 1                               # 캐시에서 꺼냄
+    src.candidates("C")
+    assert len(model.calls) == 2                               # 캐시에 없으면 그때 임베딩
+
+
+@pytest.mark.parametrize("meta,ntotal,msg", [
+    (dict(META, dictionary_version="d-2025Q1"), 3, "사전 버전 불일치"),
+    (META, 4, "크기가 다름"),
+])
+def test_faiss_source_rejects_mismatched_corpus(meta, ntotal, msg):
+    with pytest.raises(ValueError, match=msg):
+        h.FaissSource(_FakeIndex(ntotal, [0], [1.0]), CORPUS, meta, _FakeModel())
+
+
+def test_run_prefetches_once_per_chunk(tmp_path):
+    class CountingSource:
+        name = "counting"
+
+        def __init__(self):
+            self.prefetched = []
+
+        def prefetch(self, names):
+            self.prefetched.append(len(names))
+
+        def candidates(self, normalized):
+            return []
+
+    src = CountingSource()
+    h.run(_entities(), [src], h.MockJudge(), h.LocalStorage(str(tmp_path / "run")), chunk_size=4,
+          log=lambda *_: None)
+    assert src.prefetched == [4, 4, 1]  # 9 entity / 청크 4
+
+
+def test_fuzzy_source_uses_fixed_canonical(tmp_path):
+    pytest.importorskip("rapidfuzz")
+    path = tmp_path / "map.csv"
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["medicinalproduct", "ingredient_norm", "ingredient_set", "unii",
+                    "source", "method", "confidence", "dictionary_version"])
+        # 성분 AMLODIPINE이 복합제 행에서 먼저 등장 → #43 수정 전이면 복합제 묶음이 붙던 것
+        w.writerow(["AMLO HCTZ OLM", "AMLODIPINE", "amlodipine|hydrochlorothiazide|olmesartan medoxomil",
+                    "1J444QC288", "t", "사전", "", h.DICTIONARY_VERSION])
+        w.writerow(["INSUPROD", "INSULIN LISPRO", "insulin lispro|water ; insulin lispro", "", "t", "사전", "",
+                    h.DICTIONARY_VERSION])
+    src = h.FuzzySource(path, min_score=80)
+    cands = {c.alias: c for c in src.candidates("AMLODIPNE")}
+    assert cands["AMLODIPINE"].ingredient_set == "amlodipine"
+    assert cands["AMLODIPINE"].lexical_score >= 80 and cands["AMLODIPINE"].source == "fuzzy"
+    assert all(" ; " not in c.ingredient_set for c in src.candidates("INSUPROD"))  # 충돌 보존값 제외
+
+
+# ── DiAna 채점 ────────────────────────────────────────────────────────────────
+
+def test_load_gold_groups_combo_rows(tmp_path):
+    p = tmp_path / "dev.csv"
+    with open(p, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["raw_drug_name", "ingredient_norm", "unii", "source"])
+        w.writerow(["Symbyax", "OLANZAPINE", "", "diana"])
+        w.writerow(["Symbyax", "FLUOXETINE HYDROCHLORIDE", "", "diana"])
+        w.writerow(["klacid", "CLARITHROMYCIN", "", "diana"])
+    assert h.load_gold(p) == {"SYMBYAX": "fluoxetine|olanzapine", "KLACID": "clarithromycin"}
+
+
+def test_evaluate_scores_against_gold(tmp_path, fixture_source):
+    storage = h.LocalStorage(str(tmp_path / "run"))
+    h.run(_entities(), [fixture_source], ScriptedJudge(RESPONSES), storage, log=lambda *_: None)
+    gold = {"KLACID": "clarithromycin",                  # MATCH 정답
+            "SYMBYAX": "fluoxetine|olanzapine",          # MULTI 정답
+            "SINEMET": "carbidopa|entacapone|levodopa",  # MATCH 오답(후보에 정답 없음)
+            "ADVIL": "ibuprofen",                        # JSON 아님 → NONE, 후보엔 정답 있음
+            "XYZFAKEDRUG": "fakeine"}                    # 후보 없음 → NONE
+    r = h.evaluate(storage, gold, tmp_path / "details.csv")
+    assert r["n_gold_entities"] == 5
+    assert r["decisions"] == {"MATCH": 2, "MULTI": 1, "NONE": 2}
+    assert r["correct"] == 2
+    assert r["auto_precision"] == round(2 / 3, 4)
+    assert r["accuracy"] == 0.4 and r["none_rate"] == 0.4
+    assert r["cand_recall"] == 0.4          # KLACID·ADVIL만 후보에 정답 묶음 그대로
+    assert r["cand_recall_union"] == 0.6    # SYMBYAX는 후보 성분 합치면 포함
+    rows = _read_csv(tmp_path / "details.csv")
+    assert {r["raw_drug_name"]: r["correct"] for r in rows}["KLACID"] == "1"
+
+
+def test_cli_gold_filters_entities(tmp_path):
+    inp = tmp_path / "unknown.csv"
+    with open(inp, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["name", "n_reports"])
+        w.writerows(SAMPLE_ROWS)
+    dev = tmp_path / "dev.csv"
+    with open(dev, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["raw_drug_name", "ingredient_norm", "unii", "source"])
+        w.writerow(["KLACID 500 MG", "CLARITHROMYCIN", "", "diana"])  # entity의 두 번째 raw 이름으로도 매칭
+        w.writerow(["ADVIL", "IBUPROFEN", "", "diana"])
+    cands = tmp_path / "cands.json"
+    cands.write_text(json.dumps(FIXTURE), encoding="utf-8")
+    unmatched = _write_unmatched(tmp_path, ["KLACID 500 MG", "ADVIL"])
+    out = tmp_path / "run"
+    h.main(["run", str(inp), "--out", str(out), "--fixture-candidates", str(cands), "--gold", str(dev),
+            "--unmatched", str(unmatched)])
+    assert {r["normalized"] for r in h.iter_records(h.LocalStorage(str(out)))} == {"KLACID", "ADVIL"}
+
+
+def _write_unmatched(tmp_path, names):
+    p = tmp_path / "unmatched_for_stage3.csv"
+    with open(p, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["name"])
+        w.writerows([n] for n in names)
+    return p
+
+
+def test_restrict_gold_to_stage3_drops_leaked_names(tmp_path):
+    gold = {"KLACID": "clarithromycin", "ASPIRIN": "aspirin"}  # ASPIRIN은 사전에 있어 1단계가 처리
+    unmatched = _write_unmatched(tmp_path, ["klacid "])          # 대소문자·공백 무시
+    assert h.restrict_gold_to_stage3(gold, unmatched) == {"KLACID": "clarithromycin"}
+    with pytest.raises(FileNotFoundError):
+        h.restrict_gold_to_stage3(gold, tmp_path / "missing.csv")
+
+
+def test_cli_evaluate_scores_only_stage3_input(tmp_path, fixture_source, capsys):
+    out = tmp_path / "run"
+    h.run(_entities(), [fixture_source], ScriptedJudge(RESPONSES), h.LocalStorage(str(out)), log=lambda *_: None)
+    dev = tmp_path / "dev.csv"
+    with open(dev, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["raw_drug_name", "ingredient_norm", "unii", "source"])
+        w.writerow(["KLACID", "CLARITHROMYCIN", "", "diana"])
+        w.writerow(["ADVIL", "IBUPROFEN", "", "diana"])
+        w.writerow(["NOTRUN", "FAKEINE", "", "diana"])
+    unmatched = _write_unmatched(tmp_path, ["KLACID", "NOTRUN"])  # ADVIL은 1단계가 처리 → 채점 제외
+    h.main(["evaluate", "--out", str(out), "--gold", str(dev), "--unmatched", str(unmatched)])
+    r = json.loads(capsys.readouterr().out)
+    assert r["eval_scope"] == {"gold_file": "dev.csv", "unmatched_file": "unmatched_for_stage3.csv",
+                               "gold_names": 3, "gold_names_stage3": 2, "evaluated_entities": 1,
+                               "excluded": {"not_in_stage3_input": 1, "not_in_run": 1}}
+    assert r["n_gold_entities"] == 1 and r["correct"] == 1
+
+
+def test_run_and_evaluate_use_same_stage3_gold(tmp_path, capsys):
+    inp = tmp_path / "unknown.csv"
+    with open(inp, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["name", "n_reports"])
+        w.writerows(SAMPLE_ROWS)
+    dev = tmp_path / "dev.csv"
+    with open(dev, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["raw_drug_name", "ingredient_norm", "unii", "source"])
+        w.writerow(["KLACID", "CLARITHROMYCIN", "", "diana"])
+        w.writerow(["ADVIL", "IBUPROFEN", "", "diana"])
+    unmatched = _write_unmatched(tmp_path, ["KLACID"])
+    cands = tmp_path / "cands.json"
+    cands.write_text(json.dumps(FIXTURE), encoding="utf-8")
+    out = tmp_path / "run"
+    common = ["--out", str(out), "--gold", str(dev), "--unmatched", str(unmatched)]
+    h.main(["run", str(inp), "--fixture-candidates", str(cands), *common])
+    assert {r["normalized"] for r in h.iter_records(h.LocalStorage(str(out)))} == {"KLACID"}  # ADVIL 안 돌림
+    capsys.readouterr()
+    h.main(["evaluate", *common])
+    scope = json.loads(capsys.readouterr().out)["eval_scope"]
+    assert scope["gold_names_stage3"] == 1 and scope["excluded"] == {"not_in_stage3_input": 1, "not_in_run": 0}
