@@ -52,6 +52,7 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 from normalize import normalize_query
 from build_map import DICTIONARY_VERSION, normalize_ingredient
+from eval_recall import UNMATCHED_DEFAULT, load_stage3_names
 
 PIPELINE_VERSION = "c-stage3-v0"
 STAGE = 3
@@ -710,6 +711,26 @@ def load_gold(path: Path) -> dict[str, str]:
     return {k: "|".join(sorted(v)) for k, v in parts.items()}
 
 
+def restrict_gold_to_stage3(gold: dict[str, str], unmatched: Path) -> dict[str, str]:
+    """정답지를 3단계 실제 입력(unmatched_for_stage3.csv)과 겹치는 이름으로 좁힌다(§9 leakage 방지).
+    dev의 상당수(~33%)는 이미 사전에 있어 1단계가 처리할 것들이라, dev 전체로 채점하면 정확도가
+    부풀려진다. eval_recall.py(Recall@K)와 같은 필터."""
+    if not unmatched.exists():
+        raise FileNotFoundError(f"{unmatched} 없음 — 3단계 입력(unmatched_for_stage3.csv) 필요")
+    names = load_stage3_names(unmatched)
+    return {k: v for k, v in gold.items() if k in names}
+
+
+def load_stage3_gold(gold_path: Path, unmatched: Path) -> tuple[dict[str, str], dict]:
+    """run --gold와 evaluate가 같은 교집합을 쓰도록 한 곳에서 만든다. (정답지, 평가 범위 기록)."""
+    gold_all = load_gold(gold_path)
+    gold = restrict_gold_to_stage3(gold_all, unmatched)
+    scope = {"gold_file": gold_path.name, "unmatched_file": unmatched.name,
+             "gold_names": len(gold_all), "gold_names_stage3": len(gold),
+             "excluded": {"not_in_stage3_input": len(gold_all) - len(gold)}}
+    return gold, scope
+
+
 def gold_for_entity(entity: Entity, gold: dict[str, str]) -> str | None:
     """entity의 raw 이름 중 정답지에 있는 첫 이름(신고 많은 순)의 정답."""
     for name, _ in entity.raw_names:
@@ -730,16 +751,17 @@ def evaluate(storage, gold: dict[str, str], details_csv: Path | None = None) -> 
     - accuracy          : 전체 중 정답으로 붙인 비율 (NONE은 못 맞힌 것으로 셈)
     - none_rate         : NONE 비율
     - cand_recall       : 후보 Top-K 안에 정답 묶음이 그대로 있는 비율 — LLM이 맞힐 수 있는 상한
-    - cand_recall_union : 후보 성분을 다 합쳤을 때 정답 성분을 전부 포함하는 비율(복합제 MULTI 상한)"""
+    - cand_recall_union : 후보 성분을 다 합쳤을 때 정답 성분을 전부 포함하는 비율(복합제 MULTI 상한)
+    gold는 3단계 입력과의 교집합(load_stage3_gold)이어야 한다 — dev 전체면 점수가 부풀려진다(§9).
+    gold_names_not_in_run: 정답지 이름 중 저장된 판정이 없는 수(--limit·--min-reports로 안 돌린 것 등)."""
     n = decided = correct = none = cand_hit = cand_union_hit = 0
     by_decision = {k: 0 for k in DECISIONS}
     details = []
+    seen_gold: set[str] = set()
     for rec in iter_records(storage):
-        g = None
-        for name, _ in rec["raw_names"]:
-            g = gold.get(name.strip().upper())
-            if g:
-                break
+        names = [name.strip().upper() for name, _ in rec["raw_names"]]
+        seen_gold.update(x for x in names if x in gold)
+        g = next((gold[x] for x in names if x in gold), None)
         if not g:
             continue
         n += 1
@@ -760,7 +782,8 @@ def evaluate(storage, gold: dict[str, str], details_csv: Path | None = None) -> 
                         "n_reports": rec["n_reports"], "gold": g, "decision": dec, "resolved": res,
                         "correct": int(dec != "NONE" and res == g), "gold_in_candidates": int(hit),
                         "note": rec.get("note", ""), "candidates": " ; ".join(cand_sets[:5])})
-    result = {"n_gold_entities": n, "decisions": by_decision, "correct": correct,
+    result = {"n_gold_entities": n, "gold_names_not_in_run": len(gold) - len(seen_gold),
+              "decisions": by_decision, "correct": correct,
               "auto_precision": _ratio(correct, decided), "accuracy": _ratio(correct, n),
               "none_rate": _ratio(none, n), "cand_recall": _ratio(cand_hit, n),
               "cand_recall_union": _ratio(cand_union_hit, n)}
@@ -792,6 +815,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--fixture-candidates", type=Path,
                    help="가짜 검색 JSON {정규화명: [후보...]} — 주면 --sources 무시")
     r.add_argument("--gold", type=Path, help="DiAna dev CSV — 주면 정답지에 있는 entity만 돌림(프롬프트 비교용)")
+    r.add_argument("--unmatched", type=Path, default=UNMATCHED_DEFAULT,
+                   help="--gold를 이 파일(3단계 실제 입력)과 겹치는 이름으로 좁힘(§9 leakage 방지)")
     r.add_argument("--top-k", type=int, default=10, help="LLM에 줄 후보 수(3-A 운영점 K=10)")
     r.add_argument("--min-reports", type=int, default=1, help="신고 ≥N건 entity만(운영점, #48 곡선)")
     r.add_argument("--limit", type=int, help="앞에서 N개 entity만(신고 많은 순)")
@@ -801,6 +826,8 @@ def build_parser() -> argparse.ArgumentParser:
     e = sub.add_parser("evaluate", help="저장된 판정을 DiAna 정답지와 비교")
     e.add_argument("--out", required=True, help="run의 --out과 같은 위치")
     e.add_argument("--gold", type=Path, default=DEFAULT_GOLD, help="DiAna dev CSV")
+    e.add_argument("--unmatched", type=Path, default=UNMATCHED_DEFAULT,
+                   help="이 파일(3단계 실제 입력)과 겹치는 정답만 채점(§9 leakage 방지, eval_recall과 동일)")
     e.add_argument("--details-csv", type=Path, help="entity별 채점 결과 CSV(오답 분석용)")
 
     f = sub.add_parser("finalize", help="part들 → candidate/resolution/raw_map CSV")
@@ -816,13 +843,18 @@ def main(argv=None):
         print(finalize(storage, args.dest))
         return
     if args.cmd == "evaluate":
-        result = evaluate(storage, load_gold(args.gold), args.details_csv)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        gold, scope = load_stage3_gold(args.gold, args.unmatched)
+        result = evaluate(storage, gold, args.details_csv)
+        scope["excluded"]["not_in_run"] = result.pop("gold_names_not_in_run")
+        scope["evaluated_entities"] = result["n_gold_entities"]
+        print(json.dumps({"eval_scope": scope, **result}, ensure_ascii=False, indent=2))
         return
 
     entities = [e for e in group_entities(load_rows(args.input)) if e.n_reports >= args.min_reports]
-    gold = load_gold(args.gold) if args.gold else None
-    if gold is not None:
+    gold = None
+    if args.gold:
+        gold, scope = load_stage3_gold(args.gold, args.unmatched)
+        print("정답지 범위(leakage 방지):", json.dumps(scope, ensure_ascii=False))
         entities = [e for e in entities if gold_for_entity(e, gold)]
         print(f"정답지 대상 entity {len(entities):,}개 (입력 ∩ {args.gold.name})")
     if args.limit:

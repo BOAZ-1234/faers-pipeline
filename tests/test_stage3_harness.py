@@ -436,6 +436,69 @@ def test_cli_gold_filters_entities(tmp_path):
         w.writerow(["ADVIL", "IBUPROFEN", "", "diana"])
     cands = tmp_path / "cands.json"
     cands.write_text(json.dumps(FIXTURE), encoding="utf-8")
+    unmatched = _write_unmatched(tmp_path, ["KLACID 500 MG", "ADVIL"])
     out = tmp_path / "run"
-    h.main(["run", str(inp), "--out", str(out), "--fixture-candidates", str(cands), "--gold", str(dev)])
+    h.main(["run", str(inp), "--out", str(out), "--fixture-candidates", str(cands), "--gold", str(dev),
+            "--unmatched", str(unmatched)])
     assert {r["normalized"] for r in h.iter_records(h.LocalStorage(str(out)))} == {"KLACID", "ADVIL"}
+
+
+def _write_unmatched(tmp_path, names):
+    p = tmp_path / "unmatched_for_stage3.csv"
+    with open(p, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["name"])
+        w.writerows([n] for n in names)
+    return p
+
+
+def test_restrict_gold_to_stage3_drops_leaked_names(tmp_path):
+    gold = {"KLACID": "clarithromycin", "ASPIRIN": "aspirin"}  # ASPIRIN은 사전에 있어 1단계가 처리
+    unmatched = _write_unmatched(tmp_path, ["klacid "])          # 대소문자·공백 무시
+    assert h.restrict_gold_to_stage3(gold, unmatched) == {"KLACID": "clarithromycin"}
+    with pytest.raises(FileNotFoundError):
+        h.restrict_gold_to_stage3(gold, tmp_path / "missing.csv")
+
+
+def test_cli_evaluate_scores_only_stage3_input(tmp_path, fixture_source, capsys):
+    out = tmp_path / "run"
+    h.run(_entities(), [fixture_source], ScriptedJudge(RESPONSES), h.LocalStorage(str(out)), log=lambda *_: None)
+    dev = tmp_path / "dev.csv"
+    with open(dev, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["raw_drug_name", "ingredient_norm", "unii", "source"])
+        w.writerow(["KLACID", "CLARITHROMYCIN", "", "diana"])
+        w.writerow(["ADVIL", "IBUPROFEN", "", "diana"])
+        w.writerow(["NOTRUN", "FAKEINE", "", "diana"])
+    unmatched = _write_unmatched(tmp_path, ["KLACID", "NOTRUN"])  # ADVIL은 1단계가 처리 → 채점 제외
+    h.main(["evaluate", "--out", str(out), "--gold", str(dev), "--unmatched", str(unmatched)])
+    r = json.loads(capsys.readouterr().out)
+    assert r["eval_scope"] == {"gold_file": "dev.csv", "unmatched_file": "unmatched_for_stage3.csv",
+                               "gold_names": 3, "gold_names_stage3": 2, "evaluated_entities": 1,
+                               "excluded": {"not_in_stage3_input": 1, "not_in_run": 1}}
+    assert r["n_gold_entities"] == 1 and r["correct"] == 1
+
+
+def test_run_and_evaluate_use_same_stage3_gold(tmp_path, capsys):
+    inp = tmp_path / "unknown.csv"
+    with open(inp, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["name", "n_reports"])
+        w.writerows(SAMPLE_ROWS)
+    dev = tmp_path / "dev.csv"
+    with open(dev, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["raw_drug_name", "ingredient_norm", "unii", "source"])
+        w.writerow(["KLACID", "CLARITHROMYCIN", "", "diana"])
+        w.writerow(["ADVIL", "IBUPROFEN", "", "diana"])
+    unmatched = _write_unmatched(tmp_path, ["KLACID"])
+    cands = tmp_path / "cands.json"
+    cands.write_text(json.dumps(FIXTURE), encoding="utf-8")
+    out = tmp_path / "run"
+    common = ["--out", str(out), "--gold", str(dev), "--unmatched", str(unmatched)]
+    h.main(["run", str(inp), "--fixture-candidates", str(cands), *common])
+    assert {r["normalized"] for r in h.iter_records(h.LocalStorage(str(out)))} == {"KLACID"}  # ADVIL 안 돌림
+    capsys.readouterr()
+    h.main(["evaluate", *common])
+    scope = json.loads(capsys.readouterr().out)["eval_scope"]
+    assert scope["gold_names_stage3"] == 1 and scope["excluded"] == {"not_in_stage3_input": 1, "not_in_run": 0}
