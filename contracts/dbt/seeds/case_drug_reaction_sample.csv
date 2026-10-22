@@ -1,0 +1,12 @@
+caseid,primaryid,caseversion,fda_dt,role_cod,ingredient_set,unii,pt
+90010001,900100011,1,20150101,PS,montelukast,,Suicidal ideation
+90010001,900100012,2,20150615,PS,montelukast,,Suicidal ideation
+90010002,900100021,1,20160202,PS,aspirin,,Gastrointestinal haemorrhage
+90010002,900100021,1,20160202,SS,aspirin,,Gastrointestinal haemorrhage
+90010002,900100021,1,20160202,C,acetaminophen,,Gastrointestinal haemorrhage
+90010003,900100031,1,20170101,PS,carbidopa|levodopa,,Stevens-Johnson syndrome
+90010003,900100031,1,20170101,PS,carbidopa|levodopa,,Toxic epidermal necrolysis
+90010004,900100041,1,20180505,PS,fentanyl,UF599785JZ,Respiratory depression
+90010004,900100041,1,20180505,I,clarithromycin,H1250JIK0A,Respiratory depression
+90010005,900100051,1,20190301,PS,zoledronic acid,,Osteonecrosis of jaw
+90010006,900100061,1,20200115,PS,insulin glargine,,Hypoglycaemia
