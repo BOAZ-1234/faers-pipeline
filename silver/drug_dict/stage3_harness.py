@@ -52,7 +52,8 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 from normalize import normalize_query
-from build_map import DICTIONARY_VERSION
+from build_map import DICTIONARY_VERSION, normalize_ingredient
+from eval_recall import UNMATCHED_DEFAULT, load_stage3_names
 
 PIPELINE_VERSION = "c-stage3-v0"
 STAGE = 3
@@ -163,6 +164,132 @@ class FixtureSource:
                           lexical_score=c.get("lexical_score"), semantic_score=c.get("semantic_score"),
                           source=self.name)
                 for c in self._by_name.get(normalized, [])]
+
+
+def collapse_ingredient_alias(alias: str, ingredient_set: str) -> str:
+    """성분명 별칭이 복합제 묶음을 달고 있으면 그 성분 하나로 바꾼다.
+
+    사전에서 별칭을 뽑을 때 복합제 행의 성분명(AMLODIPINE)에도 그 행의 묶음
+    (amlodipine|hydrochlorothiazide|olmesartan medoxomil)이 붙는다 — #43에서 고친 것과 같은 문제가
+    #47 alias corpus에도 있다(실측 130,963개 중 5,665개). 별칭이 묶음의 원소 자체면 그 성분 하나가 맞다.
+    브랜드 별칭(SYMBICORT → budesonide|formoterol)은 원소가 아니라 그대로 둔다."""
+    parts = [p.strip() for p in ingredient_set.split("|") if p.strip()]
+    if len(parts) < 2:
+        return ingredient_set
+    for a in (alias.strip().lower(), normalize_ingredient(alias).lower()):
+        if a in parts:
+            return a
+    return ingredient_set
+
+
+class FaissSource:
+    """3-A 임베딩 검색(#47). alias corpus의 별칭을 의미 유사도로 찾아 성분 묶음 후보를 낸다.
+
+    index·corpus는 #47 build_index.py 산출물(같은 빌드의 짝). 질의는 entity 정규화명.
+    청크 단위로 prefetch()해 한 번에 임베딩·검색한다(entity마다 모델을 부르면 수십만 번)."""
+    name = "faiss"
+
+    def __init__(self, index, corpus: list[dict], meta: dict, model, search_k: int = 20,
+                 batch_size: int = 256):
+        check_corpus_meta(meta, index.ntotal, len(corpus))
+        self.index, self.corpus, self.model = index, corpus, model
+        self.search_k, self.batch_size = search_k, batch_size
+        self.retrieval_version = meta.get("retrieval_version", "r-unknown")
+        self.prefix = "query: " if "e5" in meta.get("embedding_model", "").lower() else ""
+        self._cache: dict[str, list[Candidate]] = {}
+
+    @classmethod
+    def from_files(cls, index_path: Path, corpus_path: Path, **kw) -> "FaissSource":
+        import faiss
+        from sentence_transformers import SentenceTransformer
+        corpus, meta = load_alias_corpus(corpus_path)
+        index = faiss.read_index(str(index_path))
+        model = SentenceTransformer(meta["embedding_model"])
+        return cls(index, corpus, meta, model, **kw)
+
+    def prefetch(self, names: list[str]) -> None:
+        todo = [n for n in dict.fromkeys(names) if n not in self._cache]
+        if not todo:
+            return
+        vecs = self.model.encode([self.prefix + n for n in todo], batch_size=self.batch_size,
+                                 normalize_embeddings=True, convert_to_numpy=True, show_progress_bar=False)
+        scores, ids = self.index.search(vecs.astype("float32") if hasattr(vecs, "astype") else vecs,
+                                        self.search_k)
+        for n, srow, irow in zip(todo, scores, ids):
+            self._cache[n] = self._to_candidates(srow, irow)
+
+    def _to_candidates(self, scores, ids) -> list[Candidate]:
+        out = []
+        for score, idx in zip(scores, ids):
+            idx = int(idx)
+            if idx < 0:  # 인덱스가 search_k보다 작으면 FAISS가 -1로 채운다
+                continue
+            row = self.corpus[idx]
+            iset = collapse_ingredient_alias(row["alias"], row["ingredient_set"])
+            out.append(Candidate(alias=row["alias"], ingredient_set=iset, semantic_score=float(score),
+                                 source=self.name))
+        return out
+
+    def candidates(self, normalized: str) -> list[Candidate]:
+        if normalized not in self._cache:
+            self.prefetch([normalized])
+        return self._cache.pop(normalized)  # 한 번 쓰면 버린다(수십만 개 캐시가 쌓이지 않게)
+
+
+def load_alias_corpus(path: Path) -> tuple[list[dict], dict]:
+    rows, meta = [], {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            obj = json.loads(line)
+            if obj.get("__meta__"):
+                meta = obj
+            else:
+                rows.append(obj)
+    return rows, meta
+
+
+def check_corpus_meta(meta: dict, index_size: int, corpus_size: int) -> None:
+    """corpus가 지금 사전 버전으로 만든 것이고 인덱스와 짝인지 확인한다(어긋나면 엉뚱한 성분을 반환)."""
+    if meta.get("dictionary_version") != DICTIONARY_VERSION:
+        raise ValueError(f"alias corpus 사전 버전 불일치: {meta.get('dictionary_version')} ≠ {DICTIONARY_VERSION}"
+                         " — 현재 사전으로 build_index.py 재빌드 필요")
+    if index_size != corpus_size:
+        raise ValueError(f"FAISS 인덱스({index_size:,})와 corpus({corpus_size:,}) 크기가 다름 — 같은 빌드의 짝이 아님")
+
+
+class FuzzySource:
+    """2단계 글자 유사도(#43 similarity)를 후보 생성기로 재사용한다(설계 §2-1: 리졸버가 아니라
+    LLM 후보 union의 보조 생성기). 2단계가 margin 등으로 보류한 변형을 후보로 다시 건진다.
+    채택 판단은 하지 않고 점수 상위만 넘긴다 — 판정은 LLM 몫."""
+    name = "fuzzy"
+
+    def __init__(self, map_path: Path, limit: int = 10, min_score: float = 80.0,
+                 scorer: str = "token_sort_ratio"):
+        import similarity
+        from renormalize import check_map
+        check_map(map_path)
+        self._sim = similarity
+        self.cands = similarity.load_candidates(map_path)
+        self.scorer = similarity.SCORERS[scorer]
+        self.limit, self.min_score = limit, min_score
+        self.retrieval_version = f"fuzzy-{scorer}"
+
+    def candidates(self, normalized: str) -> list[Candidate]:
+        choices = self.cands.buckets.get(self._sim.block_key(normalized))
+        if not choices:
+            return []
+        out = []
+        for cand, score, _ in self._sim.process.extract(normalized, choices, scorer=self.scorer,
+                                                         limit=self.limit):
+            if score < self.min_score:
+                continue
+            rec, _ = self.cands.canonical(cand)  # #43 수정분: 성분명 매칭은 그 성분 하나
+            iset = rec["ingredient_set"].strip()
+            if not iset or " ; " in iset:  # 소스 충돌 보존값은 단일 후보로 못 씀
+                continue
+            out.append(Candidate(alias=cand, ingredient_set=iset, unii=rec.get("unii", ""),
+                                 lexical_score=float(score), source=self.name))
+        return out
 
 
 def union_candidates(lists: list[list[Candidate]], top_k: int) -> list[Candidate]:
@@ -387,7 +514,7 @@ class NullTracer:
     def trace(self, entity: Entity, cands: list[Candidate], meta: dict, routing_reason: str):
         yield None
 
-    def record(self, handle, d: Decision, ingredient_set: str, model: str) -> None:
+    def record(self, handle, d: Decision, ingredient_set: str, model: str, gold: str | None = None) -> None:
         pass
 
     def flush(self) -> None:
@@ -415,12 +542,12 @@ class LangfuseTracerAdapter:
         with self._tracer.trace(entity.representative, lf_meta) as t:
             yield t
 
-    def record(self, handle, d: Decision, ingredient_set: str, model: str) -> None:
+    def record(self, handle, d: Decision, ingredient_set: str, model: str, gold: str | None = None) -> None:
         if handle is None:
             return
         if d.prompt:
             handle.log_generation(d.prompt, d.response, d.usage, model=model)
-        handle.log_output(d.decision, ingredient_set)
+        handle.log_output(d.decision, ingredient_set, gold=gold)  # gold 있으면 trace에 정답 여부가 붙는다
 
     def flush(self) -> None:
         self._tracer.flush()
@@ -592,6 +719,109 @@ def finalize(storage, dest: Path) -> dict:
     return {"resolution": len(res_rows), "candidate": len(cand_rows), "raw_map": len(raw_rows)}
 
 
+# ── DiAna dev 채점 ─────────────────────────────────────────────────────────────
+
+DEFAULT_GOLD = HERE / "golden" / "output" / "diana_golden_dev.csv"
+
+
+def load_gold(path: Path) -> dict[str, str]:
+    """DiAna 정답지(golden/diana_golden.py 산출, raw_drug_name·ingredient_norm) → {raw 대문자: 성분 묶음}.
+    복합제는 성분별로 여러 행이라 묶어서 조인키 형식(소문자·정렬·|)으로 만든다."""
+    parts: dict[str, set] = {}
+    with open(path, newline="", encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            name = r["raw_drug_name"].strip().upper()
+            ing = normalize_ingredient(r["ingredient_norm"]).lower()
+            if name and ing:
+                parts.setdefault(name, set()).add(ing)
+    return {k: "|".join(sorted(v)) for k, v in parts.items()}
+
+
+def restrict_gold_to_stage3(gold: dict[str, str], unmatched: Path) -> dict[str, str]:
+    """정답지를 3단계 실제 입력(unmatched_for_stage3.csv)과 겹치는 이름으로 좁힌다(§9 leakage 방지).
+    dev의 상당수(~33%)는 이미 사전에 있어 1단계가 처리할 것들이라, dev 전체로 채점하면 정확도가
+    부풀려진다. eval_recall.py(Recall@K)와 같은 필터."""
+    if not unmatched.exists():
+        raise FileNotFoundError(f"{unmatched} 없음 — 3단계 입력(unmatched_for_stage3.csv) 필요")
+    names = load_stage3_names(unmatched)
+    return {k: v for k, v in gold.items() if k in names}
+
+
+def load_stage3_gold(gold_path: Path, unmatched: Path) -> tuple[dict[str, str], dict]:
+    """run --gold와 evaluate가 같은 교집합을 쓰도록 한 곳에서 만든다. (정답지, 평가 범위 기록)."""
+    gold_all = load_gold(gold_path)
+    gold = restrict_gold_to_stage3(gold_all, unmatched)
+    scope = {"gold_file": gold_path.name, "unmatched_file": unmatched.name,
+             "gold_names": len(gold_all), "gold_names_stage3": len(gold),
+             "excluded": {"not_in_stage3_input": len(gold_all) - len(gold)}}
+    return gold, scope
+
+
+def gold_for_entity(entity: Entity, gold: dict[str, str]) -> str | None:
+    """entity의 raw 이름 중 정답지에 있는 첫 이름(신고 많은 순)의 정답."""
+    for name, _ in entity.raw_names:
+        g = gold.get(name.strip().upper())
+        if g:
+            return g
+    return None
+
+
+def _ratio(a: int, b: int):
+    return round(a / b, 4) if b else None
+
+
+def evaluate(storage, gold: dict[str, str], details_csv: Path | None = None) -> dict:
+    """저장된 판정을 정답지와 비교한다(설계 §6). 정답지에 있는 entity만 센다.
+
+    - auto_precision    : MATCH/MULTI로 성분을 붙인 것 중 정답 비율 — 헤드라인(1-이것 = 오답률)
+    - accuracy          : 전체 중 정답으로 붙인 비율 (NONE은 못 맞힌 것으로 셈)
+    - none_rate         : NONE 비율
+    - cand_recall       : 후보 Top-K 안에 정답 묶음이 그대로 있는 비율 — LLM이 맞힐 수 있는 상한
+    - cand_recall_union : 후보 성분을 다 합쳤을 때 정답 성분을 전부 포함하는 비율(복합제 MULTI 상한)
+    gold는 3단계 입력과의 교집합(load_stage3_gold)이어야 한다 — dev 전체면 점수가 부풀려진다(§9).
+    gold_names_not_in_run: 정답지 이름 중 저장된 판정이 없는 수(--limit·--min-reports로 안 돌린 것 등)."""
+    n = decided = correct = none = cand_hit = cand_union_hit = 0
+    by_decision = {k: 0 for k in DECISIONS}
+    details = []
+    seen_gold: set[str] = set()
+    for rec in iter_records(storage):
+        names = [name.strip().upper() for name, _ in rec["raw_names"]]
+        seen_gold.update(x for x in names if x in gold)
+        g = next((gold[x] for x in names if x in gold), None)
+        if not g:
+            continue
+        n += 1
+        res = rec["resolution"]["resolved_ingredient_set"]
+        dec = rec["decision"]
+        by_decision[dec] += 1
+        cand_sets = [c["candidate_ingredient_set"] for c in rec["candidates"]]
+        union = {x for cs in cand_sets for x in cs.split("|")}
+        hit = g in cand_sets
+        cand_hit += hit
+        cand_union_hit += set(g.split("|")) <= union
+        if dec == "NONE":
+            none += 1
+        else:
+            decided += 1
+            correct += res == g
+        details.append({"raw_drug_name": rec["raw_names"][0][0], "normalized": rec["normalized"],
+                        "n_reports": rec["n_reports"], "gold": g, "decision": dec, "resolved": res,
+                        "correct": int(dec != "NONE" and res == g), "gold_in_candidates": int(hit),
+                        "note": rec.get("note", ""), "candidates": " ; ".join(cand_sets[:5])})
+    result = {"n_gold_entities": n, "gold_names_not_in_run": len(gold) - len(seen_gold),
+              "decisions": by_decision, "correct": correct,
+              "auto_precision": _ratio(correct, decided), "accuracy": _ratio(correct, n),
+              "none_rate": _ratio(none, n), "cand_recall": _ratio(cand_hit, n),
+              "cand_recall_union": _ratio(cand_union_hit, n)}
+    if details_csv:
+        details_csv.parent.mkdir(parents=True, exist_ok=True)
+        with open(details_csv, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(details[0]) if details else ["raw_drug_name"])
+            w.writeheader()
+            w.writerows(details)
+    return result
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="C단계 3단계 하네스 (레인 ②)")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -603,7 +833,16 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--base-url", default=os.environ.get("STAGE3_LLM_BASE_URL", "http://localhost:8000/v1"))
     r.add_argument("--model", default=os.environ.get("STAGE3_LLM_MODEL", ""))
     r.add_argument("--prompt", type=Path, default=DEFAULT_PROMPT, help="시스템 프롬프트 파일(stem=prompt_version)")
-    r.add_argument("--fixture-candidates", type=Path, help="가짜 검색 JSON {정규화명: [후보...]}")
+    r.add_argument("--sources", default="faiss,fuzzy",
+                   help="후보 생성기(쉼표): faiss(3-A 임베딩, #47) · fuzzy(2단계 유사도, #43)")
+    r.add_argument("--map", type=Path, default=HERE / "drug_ingredient_map.csv", help="사전(fuzzy용)")
+    r.add_argument("--faiss-index", type=Path, default=HERE / "output" / "faiss_sapbert.index")
+    r.add_argument("--faiss-corpus", type=Path, default=HERE / "output" / "alias_corpus_sapbert.jsonl")
+    r.add_argument("--fixture-candidates", type=Path,
+                   help="가짜 검색 JSON {정규화명: [후보...]} — 주면 --sources 무시")
+    r.add_argument("--gold", type=Path, help="DiAna dev CSV — 주면 정답지에 있는 entity만 돌림(프롬프트 비교용)")
+    r.add_argument("--unmatched", type=Path, default=UNMATCHED_DEFAULT,
+                   help="--gold를 이 파일(3단계 실제 입력)과 겹치는 이름으로 좁힘(§9 leakage 방지)")
     r.add_argument("--top-k", type=int, default=10, help="LLM에 줄 후보 수(3-A 운영점 K=10)")
     r.add_argument("--min-reports", type=int, default=1, help="신고 ≥N건 entity만(운영점, #48 곡선)")
     r.add_argument("--limit", type=int, help="앞에서 N개 entity만(신고 많은 순)")
@@ -612,6 +851,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="동시 LLM 호출 수(ThreadPoolExecutor). vLLM continuous batching 활용 — "
                         "GPU에서는 8/16/32/64 sweep 후 cost per 1,000으로 운영점 결정. 1이면 순차.")
     r.add_argument("--trace", action="store_true", help="Langfuse trace(#47 langfuse_tracer 필요)")
+
+    e = sub.add_parser("evaluate", help="저장된 판정을 DiAna 정답지와 비교")
+    e.add_argument("--out", required=True, help="run의 --out과 같은 위치")
+    e.add_argument("--gold", type=Path, default=DEFAULT_GOLD, help="DiAna dev CSV")
+    e.add_argument("--unmatched", type=Path, default=UNMATCHED_DEFAULT,
+                   help="이 파일(3단계 실제 입력)과 겹치는 정답만 채점(§9 leakage 방지, eval_recall과 동일)")
+    e.add_argument("--details-csv", type=Path, help="entity별 채점 결과 CSV(오답 분석용)")
 
     f = sub.add_parser("finalize", help="part들 → candidate/resolution/raw_map CSV")
     f.add_argument("--out", required=True, help="run의 --out과 같은 위치")
@@ -625,12 +871,36 @@ def main(argv=None):
     if args.cmd == "finalize":
         print(finalize(storage, args.dest))
         return
+    if args.cmd == "evaluate":
+        gold, scope = load_stage3_gold(args.gold, args.unmatched)
+        result = evaluate(storage, gold, args.details_csv)
+        scope["excluded"]["not_in_run"] = result.pop("gold_names_not_in_run")
+        scope["evaluated_entities"] = result["n_gold_entities"]
+        print(json.dumps({"eval_scope": scope, **result}, ensure_ascii=False, indent=2))
+        return
 
     entities = [e for e in group_entities(load_rows(args.input)) if e.n_reports >= args.min_reports]
+    gold = None
+    if args.gold:
+        gold, scope = load_stage3_gold(args.gold, args.unmatched)
+        print("정답지 범위(leakage 방지):", json.dumps(scope, ensure_ascii=False))
+        entities = [e for e in entities if gold_for_entity(e, gold)]
+        print(f"정답지 대상 entity {len(entities):,}개 (입력 ∩ {args.gold.name})")
     if args.limit:
         entities = entities[:args.limit]
-    sources = [FixtureSource(args.fixture_candidates)] if args.fixture_candidates else [NoSource()]
-    retrieval_version = "fixture" if args.fixture_candidates else "none"
+    if args.fixture_candidates:
+        sources = [FixtureSource(args.fixture_candidates)]
+    else:
+        sources = []
+        for name in filter(None, (x.strip() for x in args.sources.split(","))):
+            if name == "faiss":
+                sources.append(FaissSource.from_files(args.faiss_index, args.faiss_corpus))
+            elif name == "fuzzy":
+                sources.append(FuzzySource(args.map))
+            else:
+                sys.exit(f"모르는 후보 생성기: {name}")
+        sources = sources or [NoSource()]
+    retrieval_version = "+".join(getattr(s, "retrieval_version", s.name) for s in sources)
     if args.judge == "openai":
         if not args.model:
             sys.exit("--model 또는 STAGE3_LLM_MODEL 필요")
