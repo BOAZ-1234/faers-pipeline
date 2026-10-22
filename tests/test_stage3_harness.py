@@ -54,7 +54,7 @@ class ScriptedJudge:
     model = "scripted"
     prompt_version = "test-v1"
 
-    def __init__(self, responses: dict, fail_after: int | None = None):
+    def __init__(self, responses: dict, fail_after=None):  # Optional[int]
         self.responses = responses
         self.calls = 0
         self.fail_after = fail_after
@@ -277,3 +277,55 @@ def test_cli_run_and_finalize(tmp_path):
     rows = _read_csv(tmp_path / "final" / "resolution.csv")
     assert len(rows) == 4  # 신고 ≥20 → 6개 entity 중 앞 4개
     assert rows[0]["pipeline_version"] == h.PIPELINE_VERSION
+
+
+# ── 동시성(Gate 4) ────────────────────────────────────────────────────────────
+
+def test_concurrency_produces_same_results_as_sequential(tmp_path, fixture_source):
+    """concurrency>1에서도 순차와 같은 레코드 집합을 저장한다 (순서만 다름).
+    entity_id가 레코드에 들어 있어 finalize는 멱등이고, 재실행 시 재개도 동작."""
+    seq_storage = h.LocalStorage(str(tmp_path / "seq"))
+    h.run(_entities(), [fixture_source], ScriptedJudge(RESPONSES), seq_storage,
+          concurrency=1, log=lambda *_: None)
+    seq_ids = sorted(h.done_entity_ids(seq_storage))
+
+    par_storage = h.LocalStorage(str(tmp_path / "par"))
+    h.run(_entities(), [fixture_source], ScriptedJudge(RESPONSES), par_storage,
+          concurrency=4, log=lambda *_: None)
+    par_ids = sorted(h.done_entity_ids(par_storage))
+
+    assert seq_ids == par_ids
+    # finalize도 동일한 resolution 집합을 내야 함
+    h.finalize(seq_storage, tmp_path / "seq_final")
+    h.finalize(par_storage, tmp_path / "par_final")
+    seq_rows = {r["entity_id"] for r in _read_csv(tmp_path / "seq_final" / "resolution.csv")}
+    par_rows = {r["entity_id"] for r in _read_csv(tmp_path / "par_final" / "resolution.csv")}
+    assert seq_rows == par_rows
+
+
+def test_concurrency_calls_judge_in_parallel(tmp_path, fixture_source):
+    """ThreadPoolExecutor가 여러 요청을 동시에 발사하는지 확인 — 느린 judge로 벽시계 비교.
+    sleep 0.1s * 9 entity 중 LLM 대상 6개 → 순차 0.6s / concurrency=6 ≈ 0.15s."""
+    import time
+
+    class SlowJudge:
+        model = "slow"
+        prompt_version = "slow"
+        def judge(self, entity, cands):
+            time.sleep(0.1)
+            return h.Decision("NONE", note="slow mock")
+
+    seq_storage = h.LocalStorage(str(tmp_path / "seq"))
+    t0 = time.perf_counter()
+    h.run(_entities(), [fixture_source], SlowJudge(), seq_storage,
+          concurrency=1, log=lambda *_: None)
+    seq_elapsed = time.perf_counter() - t0
+
+    par_storage = h.LocalStorage(str(tmp_path / "par"))
+    t0 = time.perf_counter()
+    h.run(_entities(), [fixture_source], SlowJudge(), par_storage,
+          concurrency=6, log=lambda *_: None)
+    par_elapsed = time.perf_counter() - t0
+
+    # 병렬이 적어도 2배는 빨라야 ThreadPoolExecutor가 돈다는 뜻 (GIL 밖 I/O sleep이므로)
+    assert par_elapsed * 2 < seq_elapsed, f"par={par_elapsed:.3f}s seq={seq_elapsed:.3f}s"

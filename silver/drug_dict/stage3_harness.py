@@ -44,6 +44,7 @@ import sys
 import time
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -489,15 +490,21 @@ def done_entity_ids(storage) -> set[str]:
 # ── run / finalize ────────────────────────────────────────────────────────────
 
 def run(entities: list[Entity], sources: list, judge, storage, *, top_k: int = 10, chunk_size: int = 200,
-        retrieval_version: str = "none", tracer=None, log=print) -> dict:
-    """entity들을 판정해 chunk_size마다 part로 저장한다. 이미 저장된 entity는 건너뛴다(재개)."""
+        retrieval_version: str = "none", tracer=None, concurrency: int = 1, log=print) -> dict:
+    """entity들을 판정해 chunk_size마다 part로 저장한다. 이미 저장된 entity는 건너뛴다(재개).
+
+    concurrency>1이면 LLM 호출을 ThreadPoolExecutor로 병렬화한다. vLLM은 continuous batching을
+    쓰므로 동시 요청이 많아야 GPU를 채운다 (1 요청씩 보내면 GPU 유휴). I/O bound(서버 응답 대기)라
+    asyncio 대신 스레드로 충분하고, 기존 동기 트레이서/저장 로직을 그대로 둘 수 있다.
+    저장은 완료된 순서(응답 순서)로 쌓되 part는 chunk_size마다 flush — Spot 중단 시 손실 최소화."""
     tracer = tracer or NullTracer()
     done = done_entity_ids(storage)
     todo = [e for e in entities if e.entity_id not in done]
     meta = {"pipeline_version": PIPELINE_VERSION, "dictionary_version": DICTIONARY_VERSION,
             "retrieval_version": retrieval_version, "prompt_version": judge.prompt_version,
             "llm_model": judge.model}
-    log(f"entity {len(entities):,}개 중 이미 완료 {len(entities) - len(todo):,}개 → 이번에 {len(todo):,}개")
+    log(f"entity {len(entities):,}개 중 이미 완료 {len(entities) - len(todo):,}개 → 이번에 {len(todo):,}개"
+        + (f" (concurrency={concurrency})" if concurrency > 1 else ""))
 
     # 실행마다 고유해야 한다 — 시각+PID만 쓰면 같은 프로세스가 1초 안에 재실행할 때 앞선 part를 덮어쓴다
     run_id = time.strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8]
@@ -512,23 +519,46 @@ def run(entities: list[Entity], sources: list, judge, storage, *, top_k: int = 1
             seq += 1
             buf = []
 
-    for e in todo:
+    def process_one(e: Entity) -> tuple[dict, str, Decision]:
+        """후보 생성 + LLM 판정 + 레코드 조립. 순수 함수 — stats·buf는 메인 스레드가 집계."""
         cands = union_candidates([s.candidates(e.normalized) for s in sources], top_k)
         if not cands:
             routing, d = ROUTING_NO_CANDIDATES, Decision("NONE", note="no candidates — LLM not called")
             rec = build_record(e, cands, d, routing, meta)
-        else:
-            routing = ROUTING_NO_MATCH  # 진입 사유(판정 결과와 별개) — 위 ROUTING_* 설명 참고
-            with tracer.trace(e, cands, meta, routing) as handle:
-                d = judge.judge(e, cands)
-                rec = build_record(e, cands, d, routing, meta)
-                tracer.record(handle, d, rec["resolution"]["resolved_ingredient_set"], judge.model)
+            return rec, routing, d
+        routing = ROUTING_NO_MATCH
+        with tracer.trace(e, cands, meta, routing) as handle:
+            d = judge.judge(e, cands)
+            rec = build_record(e, cands, d, routing, meta)
+            tracer.record(handle, d, rec["resolution"]["resolved_ingredient_set"], judge.model)
+        return rec, routing, d
+
+    def collect(rec, routing, d):
+        if routing != ROUTING_NO_CANDIDATES:
             stats["llm_calls"] += 1
         stats[d.decision] += 1
         stats["processed"] += 1
         buf.append(json.dumps(rec, ensure_ascii=False))
         if len(buf) >= chunk_size:
             flush_buf()
+
+    if concurrency <= 1:
+        for e in todo:
+            collect(*process_one(e))
+    else:
+        # ThreadPoolExecutor로 동시 호출. as_completed로 완료 순서대로 집계·저장.
+        # 결과 순서와 무관하게 entity_id가 각 레코드에 들어 있어 finalize 단계에서 멱등.
+        with ThreadPoolExecutor(max_workers=concurrency) as ex:
+            futures = {ex.submit(process_one, e): e for e in todo}
+            try:
+                for fut in as_completed(futures):
+                    collect(*fut.result())
+            except KeyboardInterrupt:
+                # Ctrl-C 또는 Spot 중단 신호: 진행 중인 응답은 저장하고 신규 제출은 중단
+                log("중단 신호 감지 — 저장된 part는 보존, 남은 요청은 취소")
+                for f in futures:
+                    f.cancel()
+                raise
     flush_buf()
     tracer.flush()
     log(f"완료: {stats}")
@@ -575,6 +605,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--min-reports", type=int, default=1, help="신고 ≥N건 entity만(운영점, #48 곡선)")
     r.add_argument("--limit", type=int, help="앞에서 N개 entity만(신고 많은 순)")
     r.add_argument("--chunk-size", type=int, default=200, help="part 하나당 entity 수(재개 단위)")
+    r.add_argument("--concurrency", type=int, default=1,
+                   help="동시 LLM 호출 수(ThreadPoolExecutor). vLLM continuous batching 활용 — "
+                        "GPU에서는 8/16/32/64 sweep 후 cost per 1,000으로 운영점 결정. 1이면 순차.")
     r.add_argument("--trace", action="store_true", help="Langfuse trace(#47 langfuse_tracer 필요)")
 
     f = sub.add_parser("finalize", help="part들 → candidate/resolution/raw_map CSV")
@@ -603,7 +636,7 @@ def main(argv=None):
         judge = MockJudge()
     tracer = LangfuseTracerAdapter() if args.trace else None
     run(entities, sources, judge, storage, top_k=args.top_k, chunk_size=args.chunk_size,
-        retrieval_version=retrieval_version, tracer=tracer)
+        retrieval_version=retrieval_version, tracer=tracer, concurrency=args.concurrency)
 
 
 if __name__ == "__main__":

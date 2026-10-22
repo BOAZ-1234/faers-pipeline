@@ -60,8 +60,24 @@ def test_ingredient_set_preserved():
              "ingredient_set": "emtricitabine|tenofovir disoproxil fumarate"},
         ])
         rows = extract_aliases(p)
-    isets = {r["ingredient_set"] for r in rows}
-    assert "emtricitabine|tenofovir disoproxil fumarate" in isets
+    by_alias = {r["alias"]: r["ingredient_set"] for r in rows}
+    # 브랜드는 복합제 묶음 그대로
+    assert by_alias["TRUVADA"] == "emtricitabine|tenofovir disoproxil fumarate"
+    # 복합제 성분 별칭은 그 성분 하나로 접힘 (#47 5,665개 버그 수정)
+    assert by_alias["EMTRICITABINE"] == "emtricitabine", f"collapse 실패: {by_alias}"
+
+
+def test_collapse_single_ingredient_unchanged():
+    """단일제는 묶음이 1개라 collapse 대상 아님 — 그대로 유지."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        p = _mini_map(Path(td), [
+            {"medicinalproduct": "ASPIRIN 81MG", "ingredient_norm": "ASPIRIN",
+             "ingredient_set": "aspirin"},
+        ])
+        rows = extract_aliases(p)
+    for r in rows:
+        assert r["ingredient_set"] == "aspirin"
 
 
 def test_normalize_import():
@@ -104,6 +120,7 @@ if __name__ == "__main__":
     test_alias_extraction()
     test_no_duplicate_alias()
     test_ingredient_set_preserved()
+    test_collapse_single_ingredient_unchanged()
     test_normalize_import()
     test_index_roundtrip()
     print("모든 체크 통과")
