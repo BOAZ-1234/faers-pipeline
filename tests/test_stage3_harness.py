@@ -329,3 +329,33 @@ def test_concurrency_calls_judge_in_parallel(tmp_path, fixture_source):
 
     # 병렬이 적어도 2배는 빨라야 ThreadPoolExecutor가 돈다는 뜻 (GIL 밖 I/O sleep이므로)
     assert par_elapsed * 2 < seq_elapsed, f"par={par_elapsed:.3f}s seq={seq_elapsed:.3f}s"
+
+
+def test_concurrency_cancels_pending_on_worker_exception(tmp_path, fixture_source):
+    """P1 — worker 예외 시 큐에 남은 future를 취소해야 한다 (GPU 비용·시간 보호).
+    judge가 세 번째 호출에서 터지면, 뒤 entity들은 돌지 않아야 함."""
+    import threading
+
+    class ExplodingJudge:
+        model = "boom"
+        prompt_version = "boom"
+        def __init__(self):
+            self.calls = 0
+            self.lock = threading.Lock()
+        def judge(self, entity, cands):
+            with self.lock:
+                self.calls += 1
+                if self.calls == 3:
+                    raise RuntimeError("LLM 서버 터짐")
+            return h.Decision("NONE", note="ok")
+
+    storage = h.LocalStorage(str(tmp_path / "run"))
+    judge = ExplodingJudge()
+    # concurrency=2로 — 터진 후 남은 작업이 큰 수 돌면 안 됨.
+    with pytest.raises(RuntimeError, match="LLM 서버 터짐"):
+        h.run(_entities(), [fixture_source], judge, storage,
+              concurrency=2, log=lambda *_: None)
+    # LLM 호출 대상은 9 entity 중 후보 있는 6개. concurrency=2이고 3번째에서 터지면,
+    # 이미 돌기 시작한 것만 끝나고 나머지는 취소 — 최대 몇 개 정도만 더 돈다.
+    # cancel 안 되면 6개 전부 돌아감.
+    assert judge.calls < 6, f"pending future가 취소되지 않음: {judge.calls}개 돌아감"

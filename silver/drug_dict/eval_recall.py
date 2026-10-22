@@ -129,7 +129,12 @@ def _covers(isets: list[str], expected: set[str]) -> bool:
 def fuzzy_top_isets(queries: list[str], k_max: int) -> dict[str, list[str]]:
     """Stage 2 fuzzy의 상위 k_max개 후보에 붙은 ingredient_set을 그대로 돌려준다.
     채택 임계값·마진은 적용하지 않는다 — recall 측정은 "후보에 정답이 있나"지
-    "자동 확정 가능한가"가 아니다 (Gate 3 — judge accuracy와 분리)."""
+    "자동 확정 가능한가"가 아니다 (Gate 3 — judge accuracy와 분리).
+
+    복합제 보정: cands.canonical(cand)를 써서 similarity.py의 복합제 collapse를 재사용한다
+    (PR#43에서 Stage 2 매칭에만 적용돼 있던 로직). records[cand][0]만 쓰면
+    amlodipine alias가 복합제 묶음(amlodipine|hydrochlorothiazide|olmesartan) 전체로 세어져
+    fuzzy·union recall을 부풀린다 (Codex 리뷰 P2)."""
     from rapidfuzz import fuzz
     from similarity import Candidates, block_key, load_candidates
     from normalize import normalize_query
@@ -149,8 +154,7 @@ def fuzzy_top_isets(queries: list[str], k_max: int) -> dict[str, list[str]]:
         hits = process.extract(q, choices, scorer=fuzz.token_sort_ratio, limit=k_max)
         isets: list[str] = []
         for cand, _score, _idx in hits:
-            # 같은 cand에 여러 사전 행이 걸릴 수 있으나(브랜드 중복), 첫 행만 쓴다
-            rec = cands.records[cand][0]
+            rec, _ambiguous = cands.canonical(cand)  # 복합제 성분 alias → 성분 하나로 접힌 행
             iset = rec.get("ingredient_set", "").split(" ; ")[0].strip() \
                    or rec.get("ingredient_norm", "").lower()
             isets.append(iset)

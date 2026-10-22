@@ -24,6 +24,7 @@ from eval_recall import (
     load_dev,
     load_stage3_names,
 )
+from gold_vocab import filter_out_of_scope_gold
 
 
 def classify(raw: str) -> str:
@@ -59,6 +60,9 @@ def main() -> None:
                     default=HERE / "output" / "alias_corpus_sapbert.jsonl")
     ap.add_argument("--k", type=int, default=10)
     ap.add_argument("--n-samples", type=int, default=30, help="눈으로 볼 샘플 개수")
+    ap.add_argument("--include-oos", action="store_true",
+                    help="OUT_OF_SCOPE 라벨(*, UNSPECIFIED / SKIN CARE 등)도 포함해 분석. "
+                         "기본은 제외 — eval_recall과 동일 모집단으로 숫자가 맞아야 함 (Codex P2).")
     ap.add_argument("--out-csv", type=Path,
                     default=HERE / "output" / "stage3_misses.csv")
     args = ap.parse_args()
@@ -71,6 +75,12 @@ def main() -> None:
     queries = [q for q in gold if q.upper() in stage3]
     gold = {q: gold[q] for q in queries}
     print(f"Stage 3 입력 교집합: {len(queries)}개")
+
+    if not args.include_oos:
+        before = len(gold)
+        gold, removed = filter_out_of_scope_gold(gold)
+        queries = [q for q in queries if q in gold]
+        print(f"OUT_OF_SCOPE 제거: {before} → {len(gold)}개 ({removed}개 제외)")
 
     print("SapBERT 로드·검색...")
     model = SentenceTransformer(MODEL_IDS["sapbert"])
