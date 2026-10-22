@@ -1,0 +1,67 @@
+version: 2
+
+# ── B단계 그레인 계약 ─────────────────────────────────────────────────────
+# config.contract.enforced=true → CREATE TABLE 시점에 컬럼 이름·타입·제약을 강제.
+# 기획서 §4-4 "1주차에 스키마 못 박고 시작한다 — 나중에 얹으면 집계 코드 전체가
+# 재작업"에 따라, GOLD 집계(가장자리 합 트릭)가 기대하는 입력 모양을 여기서 고정한다.
+#
+# role_cod 필터(PS/SS)·caseversion 최신판 선택은 여기서 강제하지 않는다 — 그건
+# "어떤 값이 맞는 입력이냐"가 아니라 "그 입력을 어떻게 쓰느냐"라서 GOLD의 집계
+# 로직(쿼리) 책임이다. 이 계약은 그 로직이 기대할 수 있는 컬럼이 실제로 존재하고
+# 형식이 맞는지만 본다.
+
+models:
+  - name: fct_case_drug_reaction
+    description: >
+      SILVER-2 "펼치기" — 신고 1건의 약물 1개 × 반응 1개가 1행. GOLD 4칸 집계의
+      유일한 입력. role_cod 필터·caseversion 최신판 선택은 여기서 안 하고 GOLD가
+      쿼리 시점에 적용한다(원본을 최대한 보존해 재실험 가능하게).
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: caseid
+        description: "FAERS 신고 고유 ID. caseversion과 같이 봐야 '같은 신고의 다른 버전'을 식별할 수 있다."
+        data_type: varchar
+        constraints:
+          - type: not_null
+      - name: primaryid
+        description: "버전까지 포함한 레코드 ID. 한 caseid에 caseversion마다 다른 primaryid."
+        data_type: varchar
+        constraints:
+          - type: not_null
+      - name: caseversion
+        description: "이 case의 버전 번호. GOLD가 '최신판만' 또는 'as_of 시점까지 최신'을 고를 때 씀."
+        data_type: integer
+        constraints:
+          - type: not_null
+      - name: fda_dt
+        description: "FDA가 이 버전을 접수한 날짜(YYYYMMDD). 시점 재현(§4-6)의 as_of 경계."
+        data_type: varchar
+        constraints:
+          - type: not_null
+      - name: role_cod
+        description: >
+          FAERS 원본 role_cod 그대로 보존(PS/SS/C/I 등) — 필터링 안 함.
+          실측(2026-10-07): 전체 drug 행 중 C 41.29%·SS 33.49%·PS 24.71%·I 0.51%.
+          GOLD는 PS/SS만 쓰기로 결정(action-plan.md 1장)했지만, 그 결정을 바꿔
+          재실험할 수 있어야 해서 원본값을 그대로 둔다.
+        data_type: varchar
+        constraints:
+          - type: not_null
+      - name: ingredient_set
+        description: >
+          C단계 stg_resolution.resolved_ingredient_set 조인 결과. 미해결 약이름이면
+          빈값일 수 있어 not_null은 걸지 않음(stg_resolution과 동일 원칙).
+        data_type: varchar
+      - name: unii
+        description: "C단계 stg_resolution.unii 조인 결과. 복합제 묶음이면 빈값."
+        data_type: varchar
+      - name: pt
+        description: >
+          FAERS 반응 원본 표준용어(MedDRA PT) 그대로 — 변환·묶음 없음(4-3).
+          pt_set_id(묶음)는 D단계가 정답지 문장을 풀 때만 쓰는 별개 개념이라
+          여기엔 없다(contracts/dbt/README.md 참고).
+        data_type: varchar
+        constraints:
+          - type: not_null
