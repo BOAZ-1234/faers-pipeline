@@ -2,7 +2,7 @@
 Stage 3-A — Recall@K 측정
 
 build_index.py로 만든 FAISS 인덱스에 diana_golden_dev.csv의 raw_drug_name을 쿼리해
-Recall@1/5/10/20 곡선을 출력한다. E5 vs SapBERT 비교에 쓴다.
+Recall@1/5/10/20 곡선을 출력한다. E5 vs SapBERT 비교 + fuzzy 단독·union 측정에 쓴다.
 
 평가 방식:
   쿼리: raw_drug_name (정규화 없음 — Stage 0 normalize_query는 캐스케이드가 적용할 것이고
@@ -13,10 +13,12 @@ Recall@1/5/10/20 곡선을 출력한다. E5 vs SapBERT 비교에 쓴다.
   모든 성분이 Top-K 안에 있어야 hit — AND 기준).
 
 실행:
-  python3 eval_recall.py --index output/faiss_e5.index --corpus output/alias_corpus_e5.jsonl
-  python3 eval_recall.py --index output/faiss_sapbert.index --corpus output/alias_corpus_sapbert.jsonl \\
-      --model sapbert --out-csv output/recall_sapbert.csv
-  # 인덱스와 corpus는 같은 model_key 짝으로 넘긴다(행 ID가 짝으로 묶여 있음).
+  # embedding 단독
+  python3 eval_recall.py --index output/faiss_sapbert.index --corpus output/alias_corpus_sapbert.jsonl --model sapbert
+  # fuzzy 단독
+  python3 eval_recall.py --fuzzy-only
+  # fuzzy ∪ embedding (후보 합집합 recall)
+  python3 eval_recall.py --index output/faiss_sapbert.index --corpus output/alias_corpus_sapbert.jsonl --model sapbert --union
 """
 from __future__ import annotations
 
@@ -81,7 +83,8 @@ def recall_at_k(
     model,
     prefix: str,
     k_max: int,
-) -> tuple[dict[int, float], dict[int, int]]:
+) -> tuple[dict[int, float], dict[int, int], dict[str, list[str]]]:
+    """embedding Top-K 후보로 Recall@K 측정. 반환: scores, hits, query→top_isets."""
     import numpy as np
 
     vecs = model.encode(
@@ -95,58 +98,135 @@ def recall_at_k(
     _, indices = index.search(vecs, k_max)  # (n_queries, k_max)
 
     hits = {k: 0 for k in KS}
+    top_by_query: dict[str, list[str]] = {}  # union 계산용 — K별 top ingredient_set 리스트
     for i, qname in enumerate(queries):
-        expected = gold[qname]  # set of ingredient_norm
+        expected = gold[qname]
         top_isets = [corpus[idx]["ingredient_set"] for idx in indices[i] if idx != -1]
+        top_by_query[qname] = top_isets
 
         for k in KS:
-            candidate_ingrs: set[str] = set()
-            for iset in top_isets[:k]:
-                for part in iset.split("|"):
-                    candidate_ingrs.add(part.strip().upper())
-            if expected.issubset(candidate_ingrs):
+            if _covers(top_isets[:k], expected):
                 hits[k] += 1
 
+    n = len(queries)
+    return {k: hits[k] / n for k in KS}, hits, top_by_query
+
+
+def _covers(isets: list[str], expected: set[str]) -> bool:
+    """ingredient_set 리스트가 expected 성분을 모두 포함하면 True.
+    gold_vocab 동의어 매핑으로 후보 쪽을 확장해 비교
+    (예: 후보에 'ascorbic acid'면 VITAMIN C도 커버한 것으로 인정)."""
+    from gold_vocab import expand_candidate_names
+
+    candidate_ingrs: set[str] = set()
+    for iset in isets:
+        for part in iset.split("|"):
+            candidate_ingrs.add(part.strip().upper())
+    candidate_ingrs = expand_candidate_names(candidate_ingrs)
+    return expected.issubset(candidate_ingrs)
+
+
+def fuzzy_top_isets(queries: list[str], k_max: int) -> dict[str, list[str]]:
+    """Stage 2 fuzzy의 상위 k_max개 후보에 붙은 ingredient_set을 그대로 돌려준다.
+    채택 임계값·마진은 적용하지 않는다 — recall 측정은 "후보에 정답이 있나"지
+    "자동 확정 가능한가"가 아니다 (Gate 3 — judge accuracy와 분리).
+
+    복합제 보정: cands.canonical(cand)를 써서 similarity.py의 복합제 collapse를 재사용한다
+    (PR#43에서 Stage 2 매칭에만 적용돼 있던 로직). records[cand][0]만 쓰면
+    amlodipine alias가 복합제 묶음(amlodipine|hydrochlorothiazide|olmesartan) 전체로 세어져
+    fuzzy·union recall을 부풀린다 (Codex 리뷰 P2)."""
+    from rapidfuzz import fuzz
+    from similarity import Candidates, block_key, load_candidates
+    from normalize import normalize_query
+    from rapidfuzz import process
+
+    cands = load_candidates()
+    out: dict[str, list[str]] = {}
+    for name in queries:
+        q = normalize_query(name)
+        if not q:
+            out[name] = []
+            continue
+        choices = cands.buckets.get(block_key(q)) or []
+        if not choices:
+            out[name] = []
+            continue
+        hits = process.extract(q, choices, scorer=fuzz.token_sort_ratio, limit=k_max)
+        isets: list[str] = []
+        for cand, _score, _idx in hits:
+            rec, _ambiguous = cands.canonical(cand)  # 복합제 성분 alias → 성분 하나로 접힌 행
+            iset = rec.get("ingredient_set", "").split(" ; ")[0].strip() \
+                   or rec.get("ingredient_norm", "").lower()
+            isets.append(iset)
+        out[name] = isets
+    return out
+
+
+def union_recall(
+    embed_top: dict[str, list[str]],
+    fuzzy_top: dict[str, list[str]],
+    gold: dict[str, set[str]],
+) -> tuple[dict[int, float], dict[int, int]]:
+    """embedding Top-K와 fuzzy Top-K 후보 합집합(각각 K개씩, 총 ≤2K)에서 recall 측정."""
+    hits = {k: 0 for k in KS}
+    for qname, expected in gold.items():
+        for k in KS:
+            merged = embed_top.get(qname, [])[:k] + fuzzy_top.get(qname, [])[:k]
+            if _covers(merged, expected):
+                hits[k] += 1
+    n = len(gold)
+    return {k: hits[k] / n for k in KS}, hits
+
+
+def fuzzy_only_recall(
+    queries: list[str],
+    gold: dict[str, set[str]],
+    k_max: int,
+) -> tuple[dict[int, float], dict[int, int]]:
+    """fuzzy 단독 Recall@K."""
+    fuzzy_top = fuzzy_top_isets(queries, k_max)
+    hits = {k: 0 for k in KS}
+    for qname in queries:
+        expected = gold[qname]
+        for k in KS:
+            if _covers(fuzzy_top.get(qname, [])[:k], expected):
+                hits[k] += 1
     n = len(queries)
     return {k: hits[k] / n for k in KS}, hits
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Stage 3-A Recall@K 측정")
-    ap.add_argument("--index", type=Path, required=True, help="FAISS 인덱스 경로")
-    ap.add_argument("--corpus", type=Path, required=True, help="alias_corpus.jsonl 경로")
+    ap = argparse.ArgumentParser(description="Stage 3-A Recall@K 측정 (embedding / fuzzy / union)")
+    ap.add_argument("--index", type=Path, help="FAISS 인덱스 경로 (embedding 쓸 때)")
+    ap.add_argument("--corpus", type=Path, help="alias_corpus.jsonl 경로 (embedding 쓸 때)")
     ap.add_argument("--dev", type=Path, default=DEV_DEFAULT, help="diana_golden_dev.csv")
-    ap.add_argument("--model", choices=list(MODEL_IDS), default="e5")
+    ap.add_argument("--model", choices=list(MODEL_IDS), default="sapbert")
+    ap.add_argument("--fuzzy-only", action="store_true",
+                    help="fuzzy 단독 recall만 측정 (--index, --corpus 불필요)")
+    ap.add_argument("--union", action="store_true",
+                    help="embedding Top-K ∪ fuzzy Top-K 합집합 recall도 측정 (embedding 모드와 함께)")
     ap.add_argument("--out-csv", type=Path, help="결과 CSV 저장 경로 (선택)")
     ap.add_argument("--unmatched", type=Path, default=UNMATCHED_DEFAULT,
                     help="unmatched_for_stage3.csv — 이 파일의 name과 겹치는 dev 쿼리만 평가 "
                          "(§9 leakage 방지: Stage 1/2가 이미 처리한 쿼리 제외)")
+    ap.add_argument("--keep-oos", action="store_true",
+                    help="OUT_OF_SCOPE 라벨(VITAMINS, UNSPECIFIED / SKIN CARE / PLACEBO 등)을 "
+                         "유지. 기본은 제외 — Triage가 분리했어야 하는 라벨은 Stage 3 recall에 부당하게 반영됨")
     args = ap.parse_args()
 
-    for p in (args.index, args.corpus, args.dev):
-        if not p.exists():
-            sys.exit(f"오류: {p} 없음")
+    if not args.fuzzy_only:
+        if not args.index or not args.corpus:
+            sys.exit("오류: embedding 모드는 --index와 --corpus 필요 (또는 --fuzzy-only)")
+        for p in (args.index, args.corpus):
+            if not p.exists():
+                sys.exit(f"오류: {p} 없음")
+    if not args.dev.exists():
+        sys.exit(f"오류: {args.dev} 없음")
 
-    import faiss
-    from sentence_transformers import SentenceTransformer
-
-    print(f"모델 로드: {MODEL_IDS[args.model]}", flush=True)
-    model = SentenceTransformer(MODEL_IDS[args.model])
-
-    print("인덱스·corpus 로드...", flush=True)
-    index = faiss.read_index(str(args.index))
-    corpus, corpus_meta = load_corpus(args.corpus)
     gold = load_dev(args.dev)
-
-    # §7: corpus 버전 메타 출력 — retrieval_version이 Langfuse trace와 대응
-    if corpus_meta:
-        print(f"corpus 메타: dictionary_version={corpus_meta.get('dictionary_version')} "
-              f"retrieval_version={corpus_meta.get('retrieval_version')} "
-              f"alias_count={corpus_meta.get('alias_count'):,}", flush=True)
-
     queries = list(gold.keys())
 
-    # §9 leakage 방지: --unmatched 지정 시 Stage 3 실제 입력과 겹치는 쿼리만 평가
+    # §9 leakage 방지
     if args.unmatched:
         if not args.unmatched.exists():
             sys.exit(f"오류: {args.unmatched} 없음")
@@ -162,20 +242,72 @@ def main() -> None:
     if not queries:
         sys.exit("평가 대상 쿼리 없음 (--unmatched와 dev set이 겹치지 않음)")
 
-    scores, hits = recall_at_k(queries, gold, corpus, index, model, QUERY_PREFIX[args.model], max(KS))
+    # OUT_OF_SCOPE 라벨 제외 (Triage가 분리했어야 하는 비성분 라벨)
+    if not args.keep_oos:
+        from gold_vocab import filter_out_of_scope_gold
+        before = len(gold)
+        gold, removed = filter_out_of_scope_gold(gold)
+        queries = [q for q in queries if q in gold]
+        print(f"OUT_OF_SCOPE 제거: {before:,} → {len(gold):,}개 "
+              f"({removed}개 제외 — 전부 OOS 라벨만 가진 쿼리)")
+        if not queries:
+            sys.exit("평가 대상 쿼리 없음 (OOS 제외 후)")
+
+    results: list[tuple[str, dict[int, float], dict[int, int]]] = []
     n = len(queries)
 
-    print(f"\nRecall@K ({args.model}):")
-    for k in KS:
-        print(f"  K={k:<3}: {scores[k]:.4f}  ({hits[k]}/{n})")
+    # fuzzy 단독
+    if args.fuzzy_only or args.union:
+        print("\nfuzzy 단독 측정...", flush=True)
+        fuzzy_scores, fuzzy_hits = fuzzy_only_recall(queries, gold, max(KS))
+        results.append(("fuzzy", fuzzy_scores, fuzzy_hits))
+        print(f"Recall@K (fuzzy):")
+        for k in KS:
+            print(f"  K={k:<3}: {fuzzy_scores[k]:.4f}  ({fuzzy_hits[k]}/{n})")
+
+    # embedding
+    embed_top = None
+    if not args.fuzzy_only:
+        import faiss
+        from sentence_transformers import SentenceTransformer
+
+        print(f"\n모델 로드: {MODEL_IDS[args.model]}", flush=True)
+        model = SentenceTransformer(MODEL_IDS[args.model])
+
+        print("인덱스·corpus 로드...", flush=True)
+        index = faiss.read_index(str(args.index))
+        corpus, corpus_meta = load_corpus(args.corpus)
+
+        if corpus_meta:
+            print(f"corpus 메타: dictionary_version={corpus_meta.get('dictionary_version')} "
+                  f"retrieval_version={corpus_meta.get('retrieval_version')} "
+                  f"alias_count={corpus_meta.get('alias_count'):,}", flush=True)
+
+        scores, hits, embed_top = recall_at_k(
+            queries, gold, corpus, index, model, QUERY_PREFIX[args.model], max(KS)
+        )
+        results.append((args.model, scores, hits))
+        print(f"\nRecall@K ({args.model}):")
+        for k in KS:
+            print(f"  K={k:<3}: {scores[k]:.4f}  ({hits[k]}/{n})")
+
+    # union
+    if args.union and embed_top is not None:
+        fuzzy_top = fuzzy_top_isets(queries, max(KS))
+        union_scores, union_hits = union_recall(embed_top, fuzzy_top, gold)
+        results.append((f"{args.model}∪fuzzy", union_scores, union_hits))
+        print(f"\nRecall@K ({args.model} ∪ fuzzy):")
+        for k in KS:
+            print(f"  K={k:<3}: {union_scores[k]:.4f}  ({union_hits[k]}/{n})")
 
     if args.out_csv:
         args.out_csv.parent.mkdir(parents=True, exist_ok=True)
         with open(args.out_csv, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["model", "k", "recall", "hits", "total"])
-            for k in KS:
-                w.writerow([args.model, k, f"{scores[k]:.4f}", hits[k], n])
+            w.writerow(["method", "k", "recall", "hits", "total"])
+            for method, scores, hits in results:
+                for k in KS:
+                    w.writerow([method, k, f"{scores[k]:.4f}", hits[k], n])
         print(f"\n결과 → {args.out_csv}")
 
 
