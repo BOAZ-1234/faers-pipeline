@@ -53,6 +53,7 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 from normalize import normalize_query
 from build_map import DICTIONARY_VERSION, normalize_ingredient
+from build_index import collapse_ingredient_alias
 from eval_recall import UNMATCHED_DEFAULT, load_stage3_names
 
 PIPELINE_VERSION = "c-stage3-v0"
@@ -164,22 +165,6 @@ class FixtureSource:
                           lexical_score=c.get("lexical_score"), semantic_score=c.get("semantic_score"),
                           source=self.name)
                 for c in self._by_name.get(normalized, [])]
-
-
-def collapse_ingredient_alias(alias: str, ingredient_set: str) -> str:
-    """성분명 별칭이 복합제 묶음을 달고 있으면 그 성분 하나로 바꾼다.
-
-    사전에서 별칭을 뽑을 때 복합제 행의 성분명(AMLODIPINE)에도 그 행의 묶음
-    (amlodipine|hydrochlorothiazide|olmesartan medoxomil)이 붙는다 — #43에서 고친 것과 같은 문제가
-    #47 alias corpus에도 있다(실측 130,963개 중 5,665개). 별칭이 묶음의 원소 자체면 그 성분 하나가 맞다.
-    브랜드 별칭(SYMBICORT → budesonide|formoterol)은 원소가 아니라 그대로 둔다."""
-    parts = [p.strip() for p in ingredient_set.split("|") if p.strip()]
-    if len(parts) < 2:
-        return ingredient_set
-    for a in (alias.strip().lower(), normalize_ingredient(alias).lower()):
-        if a in parts:
-            return a
-    return ingredient_set
 
 
 class FaissSource:
@@ -617,13 +602,15 @@ def done_entity_ids(storage) -> set[str]:
 # ── run / finalize ────────────────────────────────────────────────────────────
 
 def run(entities: list[Entity], sources: list, judge, storage, *, top_k: int = 10, chunk_size: int = 200,
-        retrieval_version: str = "none", tracer=None, concurrency: int = 1, log=print) -> dict:
+        retrieval_version: str = "none", tracer=None, gold: dict | None = None,
+        concurrency: int = 1, log=print) -> dict:
     """entity들을 판정해 chunk_size마다 part로 저장한다. 이미 저장된 entity는 건너뛴다(재개).
 
     concurrency>1이면 LLM 호출을 ThreadPoolExecutor로 병렬화한다. vLLM은 continuous batching을
     쓰므로 동시 요청이 많아야 GPU를 채운다 (1 요청씩 보내면 GPU 유휴). I/O bound(서버 응답 대기)라
     asyncio 대신 스레드로 충분하고, 기존 동기 트레이서/저장 로직을 그대로 둘 수 있다.
-    저장은 완료된 순서(응답 순서)로 쌓되 part는 chunk_size마다 flush — Spot 중단 시 손실 최소화."""
+    저장은 완료된 순서(응답 순서)로 쌓되 part는 chunk_size마다 flush — Spot 중단 시 손실 최소화.
+    gold(정답 {raw 대문자: 성분 묶음})를 주면 Langfuse trace에 정답 여부를 남긴다(채점은 evaluate)."""
     tracer = tracer or NullTracer()
     done = done_entity_ids(storage)
     todo = [e for e in entities if e.entity_id not in done]
@@ -657,7 +644,8 @@ def run(entities: list[Entity], sources: list, judge, storage, *, top_k: int = 1
         with tracer.trace(e, cands, meta, routing) as handle:
             d = judge.judge(e, cands)
             rec = build_record(e, cands, d, routing, meta)
-            tracer.record(handle, d, rec["resolution"]["resolved_ingredient_set"], judge.model)
+            tracer.record(handle, d, rec["resolution"]["resolved_ingredient_set"], judge.model,
+                          gold_for_entity(e, gold) if gold else None)
         return rec, routing, d
 
     def collect(rec, routing, d):
@@ -670,13 +658,26 @@ def run(entities: list[Entity], sources: list, judge, storage, *, top_k: int = 1
             flush_buf()
 
     if concurrency <= 1:
-        for e in todo:
+        for i, e in enumerate(todo):
+            if i % chunk_size == 0:
+                for s in sources:
+                    if hasattr(s, "prefetch"):
+                        s.prefetch([x.normalized for x in todo[i:i + chunk_size]])
             collect(*process_one(e))
     else:
+        # prefetch는 chunk 단위로 메인 스레드에서 미리 돌린다. SentenceTransformer.encode()가
+        # 147,718번 호출되지 않고 739번(chunk_size=200 기준)으로 줄어든다.
         # ThreadPoolExecutor로 동시 호출. as_completed로 완료 순서대로 집계·저장.
         # 결과 순서와 무관하게 entity_id가 각 레코드에 들어 있어 finalize 단계에서 멱등.
         with ThreadPoolExecutor(max_workers=concurrency) as ex:
-            futures = {ex.submit(process_one, e): e for e in todo}
+            futures_list = []
+            for i in range(0, len(todo), chunk_size):
+                chunk = todo[i:i + chunk_size]
+                for s in sources:
+                    if hasattr(s, "prefetch"):
+                        s.prefetch([e.normalized for e in chunk])
+                futures_list.extend(ex.submit(process_one, e) for e in chunk)
+            futures = {f: None for f in futures_list}
             try:
                 for fut in as_completed(futures):
                     collect(*fut.result())
@@ -688,6 +689,7 @@ def run(entities: list[Entity], sources: list, judge, storage, *, top_k: int = 1
                 log(f"중단 ({type(err).__name__}) — 저장된 part는 보존, 대기 중 요청 취소")
                 for f in futures:
                     f.cancel()
+                flush_buf()  # buf에 쌓인 완료분은 재시작 시 재호출되지 않도록 저장
                 raise
     flush_buf()
     tracer.flush()
@@ -909,7 +911,7 @@ def main(argv=None):
         judge = MockJudge()
     tracer = LangfuseTracerAdapter() if args.trace else None
     run(entities, sources, judge, storage, top_k=args.top_k, chunk_size=args.chunk_size,
-        retrieval_version=retrieval_version, tracer=tracer, concurrency=args.concurrency)
+        retrieval_version=retrieval_version, tracer=tracer, gold=gold, concurrency=args.concurrency)
 
 
 if __name__ == "__main__":
