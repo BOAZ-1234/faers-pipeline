@@ -54,7 +54,7 @@ class ScriptedJudge:
     model = "scripted"
     prompt_version = "test-v1"
 
-    def __init__(self, responses: dict, fail_after: int | None = None):
+    def __init__(self, responses: dict, fail_after=None):  # Optional[int]
         self.responses = responses
         self.calls = 0
         self.fail_after = fail_after
@@ -502,3 +502,85 @@ def test_run_and_evaluate_use_same_stage3_gold(tmp_path, capsys):
     h.main(["evaluate", *common])
     scope = json.loads(capsys.readouterr().out)["eval_scope"]
     assert scope["gold_names_stage3"] == 1 and scope["excluded"] == {"not_in_stage3_input": 1, "not_in_run": 0}
+
+
+# ── 동시성(Gate 4) ────────────────────────────────────────────────────────────
+
+def test_concurrency_produces_same_results_as_sequential(tmp_path, fixture_source):
+    """concurrency>1에서도 순차와 같은 레코드 집합을 저장한다 (순서만 다름).
+    entity_id가 레코드에 들어 있어 finalize는 멱등이고, 재실행 시 재개도 동작."""
+    seq_storage = h.LocalStorage(str(tmp_path / "seq"))
+    h.run(_entities(), [fixture_source], ScriptedJudge(RESPONSES), seq_storage,
+          concurrency=1, log=lambda *_: None)
+    seq_ids = sorted(h.done_entity_ids(seq_storage))
+
+    par_storage = h.LocalStorage(str(tmp_path / "par"))
+    h.run(_entities(), [fixture_source], ScriptedJudge(RESPONSES), par_storage,
+          concurrency=4, log=lambda *_: None)
+    par_ids = sorted(h.done_entity_ids(par_storage))
+
+    assert seq_ids == par_ids
+    # finalize도 동일한 resolution 집합을 내야 함
+    h.finalize(seq_storage, tmp_path / "seq_final")
+    h.finalize(par_storage, tmp_path / "par_final")
+    seq_rows = {r["entity_id"] for r in _read_csv(tmp_path / "seq_final" / "resolution.csv")}
+    par_rows = {r["entity_id"] for r in _read_csv(tmp_path / "par_final" / "resolution.csv")}
+    assert seq_rows == par_rows
+
+
+def test_concurrency_calls_judge_in_parallel(tmp_path, fixture_source):
+    """ThreadPoolExecutor가 여러 요청을 동시에 발사하는지 확인 — 느린 judge로 벽시계 비교.
+    sleep 0.1s * 9 entity 중 LLM 대상 6개 → 순차 0.6s / concurrency=6 ≈ 0.15s."""
+    import time
+
+    class SlowJudge:
+        model = "slow"
+        prompt_version = "slow"
+        def judge(self, entity, cands):
+            time.sleep(0.1)
+            return h.Decision("NONE", note="slow mock")
+
+    seq_storage = h.LocalStorage(str(tmp_path / "seq"))
+    t0 = time.perf_counter()
+    h.run(_entities(), [fixture_source], SlowJudge(), seq_storage,
+          concurrency=1, log=lambda *_: None)
+    seq_elapsed = time.perf_counter() - t0
+
+    par_storage = h.LocalStorage(str(tmp_path / "par"))
+    t0 = time.perf_counter()
+    h.run(_entities(), [fixture_source], SlowJudge(), par_storage,
+          concurrency=6, log=lambda *_: None)
+    par_elapsed = time.perf_counter() - t0
+
+    # 병렬이 적어도 2배는 빨라야 ThreadPoolExecutor가 돈다는 뜻 (GIL 밖 I/O sleep이므로)
+    assert par_elapsed * 2 < seq_elapsed, f"par={par_elapsed:.3f}s seq={seq_elapsed:.3f}s"
+
+
+def test_concurrency_cancels_pending_on_worker_exception(tmp_path, fixture_source):
+    """P1 — worker 예외 시 큐에 남은 future를 취소해야 한다 (GPU 비용·시간 보호).
+    judge가 세 번째 호출에서 터지면, 뒤 entity들은 돌지 않아야 함."""
+    import threading
+
+    class ExplodingJudge:
+        model = "boom"
+        prompt_version = "boom"
+        def __init__(self):
+            self.calls = 0
+            self.lock = threading.Lock()
+        def judge(self, entity, cands):
+            with self.lock:
+                self.calls += 1
+                if self.calls == 3:
+                    raise RuntimeError("LLM 서버 터짐")
+            return h.Decision("NONE", note="ok")
+
+    storage = h.LocalStorage(str(tmp_path / "run"))
+    judge = ExplodingJudge()
+    # concurrency=2로 — 터진 후 남은 작업이 큰 수 돌면 안 됨.
+    with pytest.raises(RuntimeError, match="LLM 서버 터짐"):
+        h.run(_entities(), [fixture_source], judge, storage,
+              concurrency=2, log=lambda *_: None)
+    # LLM 호출 대상은 9 entity 중 후보 있는 6개. concurrency=2이고 3번째에서 터지면,
+    # 이미 돌기 시작한 것만 끝나고 나머지는 취소 — 최대 몇 개 정도만 더 돈다.
+    # cancel 안 되면 6개 전부 돌아감.
+    assert judge.calls < 6, f"pending future가 취소되지 않음: {judge.calls}개 돌아감"

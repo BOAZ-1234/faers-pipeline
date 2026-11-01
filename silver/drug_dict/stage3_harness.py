@@ -44,6 +44,7 @@ import sys
 import time
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,6 +53,7 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 from normalize import normalize_query
 from build_map import DICTIONARY_VERSION, normalize_ingredient
+from build_index import collapse_ingredient_alias
 from eval_recall import UNMATCHED_DEFAULT, load_stage3_names
 
 PIPELINE_VERSION = "c-stage3-v0"
@@ -163,22 +165,6 @@ class FixtureSource:
                           lexical_score=c.get("lexical_score"), semantic_score=c.get("semantic_score"),
                           source=self.name)
                 for c in self._by_name.get(normalized, [])]
-
-
-def collapse_ingredient_alias(alias: str, ingredient_set: str) -> str:
-    """성분명 별칭이 복합제 묶음을 달고 있으면 그 성분 하나로 바꾼다.
-
-    사전에서 별칭을 뽑을 때 복합제 행의 성분명(AMLODIPINE)에도 그 행의 묶음
-    (amlodipine|hydrochlorothiazide|olmesartan medoxomil)이 붙는다 — #43에서 고친 것과 같은 문제가
-    #47 alias corpus에도 있다(실측 130,963개 중 5,665개). 별칭이 묶음의 원소 자체면 그 성분 하나가 맞다.
-    브랜드 별칭(SYMBICORT → budesonide|formoterol)은 원소가 아니라 그대로 둔다."""
-    parts = [p.strip() for p in ingredient_set.split("|") if p.strip()]
-    if len(parts) < 2:
-        return ingredient_set
-    for a in (alias.strip().lower(), normalize_ingredient(alias).lower()):
-        if a in parts:
-            return a
-    return ingredient_set
 
 
 class FaissSource:
@@ -616,9 +602,14 @@ def done_entity_ids(storage) -> set[str]:
 # ── run / finalize ────────────────────────────────────────────────────────────
 
 def run(entities: list[Entity], sources: list, judge, storage, *, top_k: int = 10, chunk_size: int = 200,
-        retrieval_version: str = "none", tracer=None, gold: dict | None = None, log=print) -> dict:
+        retrieval_version: str = "none", tracer=None, gold: dict | None = None,
+        concurrency: int = 1, log=print) -> dict:
     """entity들을 판정해 chunk_size마다 part로 저장한다. 이미 저장된 entity는 건너뛴다(재개).
-    prefetch()가 있는 후보 생성기(FAISS)는 청크마다 한 번에 임베딩·검색한다.
+
+    concurrency>1이면 LLM 호출을 ThreadPoolExecutor로 병렬화한다. vLLM은 continuous batching을
+    쓰므로 동시 요청이 많아야 GPU를 채운다 (1 요청씩 보내면 GPU 유휴). I/O bound(서버 응답 대기)라
+    asyncio 대신 스레드로 충분하고, 기존 동기 트레이서/저장 로직을 그대로 둘 수 있다.
+    저장은 완료된 순서(응답 순서)로 쌓되 part는 chunk_size마다 flush — Spot 중단 시 손실 최소화.
     gold(정답 {raw 대문자: 성분 묶음})를 주면 Langfuse trace에 정답 여부를 남긴다(채점은 evaluate)."""
     tracer = tracer or NullTracer()
     done = done_entity_ids(storage)
@@ -626,7 +617,8 @@ def run(entities: list[Entity], sources: list, judge, storage, *, top_k: int = 1
     meta = {"pipeline_version": PIPELINE_VERSION, "dictionary_version": DICTIONARY_VERSION,
             "retrieval_version": retrieval_version, "prompt_version": judge.prompt_version,
             "llm_model": judge.model}
-    log(f"entity {len(entities):,}개 중 이미 완료 {len(entities) - len(todo):,}개 → 이번에 {len(todo):,}개")
+    log(f"entity {len(entities):,}개 중 이미 완료 {len(entities) - len(todo):,}개 → 이번에 {len(todo):,}개"
+        + (f" (concurrency={concurrency})" if concurrency > 1 else ""))
 
     # 실행마다 고유해야 한다 — 시각+PID만 쓰면 같은 프로세스가 1초 안에 재실행할 때 앞선 part를 덮어쓴다
     run_id = time.strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8]
@@ -641,28 +633,64 @@ def run(entities: list[Entity], sources: list, judge, storage, *, top_k: int = 1
             seq += 1
             buf = []
 
-    for i, e in enumerate(todo):
-        if i % chunk_size == 0:
-            for s in sources:
-                if hasattr(s, "prefetch"):
-                    s.prefetch([x.normalized for x in todo[i:i + chunk_size]])
+    def process_one(e: Entity) -> tuple[dict, str, Decision]:
+        """후보 생성 + LLM 판정 + 레코드 조립. 순수 함수 — stats·buf는 메인 스레드가 집계."""
         cands = union_candidates([s.candidates(e.normalized) for s in sources], top_k)
         if not cands:
             routing, d = ROUTING_NO_CANDIDATES, Decision("NONE", note="no candidates — LLM not called")
             rec = build_record(e, cands, d, routing, meta)
-        else:
-            routing = ROUTING_NO_MATCH  # 진입 사유(판정 결과와 별개) — 위 ROUTING_* 설명 참고
-            with tracer.trace(e, cands, meta, routing) as handle:
-                d = judge.judge(e, cands)
-                rec = build_record(e, cands, d, routing, meta)
-                tracer.record(handle, d, rec["resolution"]["resolved_ingredient_set"], judge.model,
-                              gold_for_entity(e, gold) if gold else None)
+            return rec, routing, d
+        routing = ROUTING_NO_MATCH
+        with tracer.trace(e, cands, meta, routing) as handle:
+            d = judge.judge(e, cands)
+            rec = build_record(e, cands, d, routing, meta)
+            tracer.record(handle, d, rec["resolution"]["resolved_ingredient_set"], judge.model,
+                          gold_for_entity(e, gold) if gold else None)
+        return rec, routing, d
+
+    def collect(rec, routing, d):
+        if routing != ROUTING_NO_CANDIDATES:
             stats["llm_calls"] += 1
         stats[d.decision] += 1
         stats["processed"] += 1
         buf.append(json.dumps(rec, ensure_ascii=False))
         if len(buf) >= chunk_size:
             flush_buf()
+
+    if concurrency <= 1:
+        for i, e in enumerate(todo):
+            if i % chunk_size == 0:
+                for s in sources:
+                    if hasattr(s, "prefetch"):
+                        s.prefetch([x.normalized for x in todo[i:i + chunk_size]])
+            collect(*process_one(e))
+    else:
+        # prefetch는 chunk 단위로 메인 스레드에서 미리 돌린다. SentenceTransformer.encode()가
+        # 147,718번 호출되지 않고 739번(chunk_size=200 기준)으로 줄어든다.
+        # ThreadPoolExecutor로 동시 호출. as_completed로 완료 순서대로 집계·저장.
+        # 결과 순서와 무관하게 entity_id가 각 레코드에 들어 있어 finalize 단계에서 멱등.
+        with ThreadPoolExecutor(max_workers=concurrency) as ex:
+            futures_list = []
+            for i in range(0, len(todo), chunk_size):
+                chunk = todo[i:i + chunk_size]
+                for s in sources:
+                    if hasattr(s, "prefetch"):
+                        s.prefetch([e.normalized for e in chunk])
+                futures_list.extend(ex.submit(process_one, e) for e in chunk)
+            futures = {f: None for f in futures_list}
+            try:
+                for fut in as_completed(futures):
+                    collect(*fut.result())
+            except BaseException as err:
+                # KeyboardInterrupt(Spot 중단 2분 전 통지)·judge 재시도 소진 등 모든 예외에서
+                # 큐에 쌓인 future를 취소해야 한다. with 블록은 종료 시 제출된 모든 future를
+                # 기다리므로, 취소 안 하면 "실패했는데 수천 건을 더 돌리고 종료" — GPU 돈·시간
+                # 낭비. cancel()은 아직 시작 안 한 것만 중단(이미 돌고 있는 건 그대로 완료).
+                log(f"중단 ({type(err).__name__}) — 저장된 part는 보존, 대기 중 요청 취소")
+                for f in futures:
+                    f.cancel()
+                flush_buf()  # buf에 쌓인 완료분은 재시작 시 재호출되지 않도록 저장
+                raise
     flush_buf()
     tracer.flush()
     log(f"완료: {stats}")
@@ -821,6 +849,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--min-reports", type=int, default=1, help="신고 ≥N건 entity만(운영점, #48 곡선)")
     r.add_argument("--limit", type=int, help="앞에서 N개 entity만(신고 많은 순)")
     r.add_argument("--chunk-size", type=int, default=200, help="part 하나당 entity 수(재개 단위)")
+    r.add_argument("--concurrency", type=int, default=1,
+                   help="동시 LLM 호출 수(ThreadPoolExecutor). vLLM continuous batching 활용 — "
+                        "GPU에서는 8/16/32/64 sweep 후 cost per 1,000으로 운영점 결정. 1이면 순차.")
     r.add_argument("--trace", action="store_true", help="Langfuse trace(#47 langfuse_tracer 필요)")
 
     e = sub.add_parser("evaluate", help="저장된 판정을 DiAna 정답지와 비교")
@@ -880,7 +911,7 @@ def main(argv=None):
         judge = MockJudge()
     tracer = LangfuseTracerAdapter() if args.trace else None
     run(entities, sources, judge, storage, top_k=args.top_k, chunk_size=args.chunk_size,
-        retrieval_version=retrieval_version, tracer=tracer, gold=gold)
+        retrieval_version=retrieval_version, tracer=tracer, gold=gold, concurrency=args.concurrency)
 
 
 if __name__ == "__main__":
