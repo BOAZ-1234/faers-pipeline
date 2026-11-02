@@ -3,11 +3,15 @@
   "Statement": [
     {"Effect": "Allow",
      "Action": ["ec2:StartInstances", "ec2:StopInstances"],
-     "Resource": "arn:aws:ec2:ap-northeast-2:825494477740:instance/i-09ea3552c292bd78c"},
+     "Resource": "arn:aws:ec2:ap-northeast-2:825494477740:instance/*",
+     "Condition": {"StringEquals": {"aws:ResourceTag/Project": "faers-pipeline"}}},
+    {"Effect": "Allow",
+     "Action": "ssm:StartSession",
+     "Resource": "arn:aws:ec2:ap-northeast-2:825494477740:instance/*",
+     "Condition": {"StringEquals": {"ssm:resourceTag/Project": "faers-pipeline"}}},
     {"Effect": "Allow",
      "Action": "ssm:StartSession",
      "Resource": [
-       "arn:aws:ec2:ap-northeast-2:825494477740:instance/i-09ea3552c292bd78c",
        "arn:aws:ssm:ap-northeast-2:825494477740:document/SSM-SessionManagerRunShell",
        "arn:aws:ssm:ap-northeast-2::document/SSM-SessionManagerRunShell"]},
     {"Effect": "Allow",

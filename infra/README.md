@@ -12,12 +12,16 @@
 |---|---|---|
 | Budgets | `boaz-faers-projects` | 월 $15 예산 알림 |
 | IAM 정책 | `faers-team-s3` | S3 읽기 + `stage_b_silver`만 쓰기 (bronze는 읽기 전용) — [`policies/faers-team-s3.json`](policies/faers-team-s3.json) |
-| IAM 정책 | `faers-team-ec2` | 작업 서버 1대 시작/중지/SSM 접속 — [`policies/faers-team-ec2.json`](policies/faers-team-ec2.json) |
+| IAM 정책 | `faers-team-ec2` | 태그 `Project=faers-pipeline`이 붙은 인스턴스 시작/중지/SSM 접속 (`faers-work`·`faers-gpu`). 새 인스턴스는 이 태그만 붙이면 된다 — [`policies/faers-team-ec2.json`](policies/faers-team-ec2.json) |
 | IAM 정책 | `faers-team-selfkeys` | 팀원이 **본인** 액세스 키만 만들고 지울 수 있음 (`${aws:username}`으로 본인 계정에 한정) — [`policies/faers-team-selfkeys.json`](policies/faers-team-selfkeys.json) |
 | IAM 그룹 | `faers-team` | 위 세 정책 연결, 팀원 사용자를 여기에 넣는다 |
 | IAM 역할 | `faers-ec2-role` | 서버가 쓰는 역할: `faers-team-s3` + `AmazonSSMManagedInstanceCore` |
 | EC2 | `faers-work` (`i-09ea3552c292bd78c`) | m5.xlarge(4코어/16GB), Amazon Linux 2023, gp3 30GiB |
 | CloudWatch 경보 | `faers-work-idle-stop` | CPU 평균 3% 미만이 2시간 이어지면 서버 자동 중지 |
+| Budgets | `faers-gpu` | 월 $50 (실제 50·80·100% 알림) — GPU 실험 예산 (2026-10-22 회의) |
+| IAM 정책 변경 | `faers-team-s3` | `stage3/*` 쓰기 추가 — 하네스 결과(part) 저장. 삭제 권한은 일부러 없음 |
+| EC2 | `faers-gpu` (`i-08b3cf5ddb7dadc21`) | g6.xlarge(NVIDIA L4 24GB), Deep Learning OSS Nvidia Driver AMI(Ubuntu 26.04), gp3 100GiB, 역할 `faers-ec2-role`, 태그 `Project=faers-pipeline`, 인바운드 0개, 종료 방지·종료 동작 "중지". 아래 [GPU 서버](#gpu-서버-faers-gpu) |
+| 서비스 할당량 | G·VT 계열 | 온디맨드 8 vCPU / Spot 8 vCPU (2026-10-17 신청·승인) |
 
 기존 `boaz_1234_user`(액세스 키 방식)는 파이프라인용으로 남아 있다. 팀원이 새 방식으로 옮겨간 뒤 **키를 교체(rotate)** 한다.
 
@@ -105,8 +109,58 @@ spark = build_spark("MyJob", driver_memory="8g")
 
 `bronze/CLAUDE.md`의 조회 비용 규칙(기본 10건, 그 이상은 확인 후)은 서버에서도 그대로 적용된다.
 
+## GPU 서버 (`faers-gpu`)
+
+C단계 3단계 LLM 판정(vLLM) 전용. **켜져 있는 동안 시간당 과금**이고 디스크(100GiB)는 중지해도 과금된다. 예산은 `faers-gpu` $50.
+
+접속은 `faers-work`와 같다(EC2 → `faers-gpu` → **연결 → Session Manager**, SSH 없음).
+**접속하면 먼저 `bash -l`** — Ubuntu에서 Session Manager 기본 셸은 `sh`라 `source`가 없고 환경변수(`/etc/profile.d/faers-gpu.sh`)도 안 읽힌다.
+그다음 홈으로 이동 후 본인 폴더에 clone(명령은 한 줄씩 붙여넣기 — 여러 줄을 한 번에 붙이면 줄이 이어 붙는다):
+
+```bash
+bash -l
+cd ~ && mkdir -p ~/본인이름 && cd ~/본인이름
+git clone https://github.com/BOAZ-1234/faers-pipeline.git && cd faers-pipeline   # 이후엔 git pull
+```
+
+**서버를 새로 만들었을 때만** 세팅한다(디스크에 남아 중지/시작해도 다시 할 필요 없음):
+
+```bash
+bash infra/gpu/setup_gpu.sh        # Python 3.12 venv(/opt/faers-gpu-venv) + vLLM + 하네스 의존성 + 자동 중지 타이머
+```
+
+**작업할 때마다**:
+
+```bash
+source /opt/faers-gpu-venv/bin/activate
+bash infra/gpu/fetch_artifacts.sh                                   # 사전·잔여·FAISS 받기(이미 있으면 건너뜀)
+tmux new -s vllm                                                    # 세션 닫혀도 서버 유지
+bash infra/gpu/serve_vllm.sh Qwen/Qwen2.5-7B-Instruct-AWQ          # 127.0.0.1:8000. 모델 바꿀 땐 Ctrl+C 후 재실행
+# Ctrl+B, D 로 tmux 빠져나와서 다른 창에서 하네스·benchmark 실행 (기본 base-url이 이 서버)
+```
+
+- DiAna dev 정답지(`silver/drug_dict/golden/output/diana_golden_dev.csv`)는 **팀 공용 파일을 받아 둔다.** 빈도 필터 없이 새로 만들면 다른 정답지가 돼 점수 비교가 안 된다.
+- 하네스 결과를 S3에 남길 때는 `--out s3://boaz-1234-825494477740-ap-northeast-2-an/stage3/<실행이름>` (Spot 중단 시 이어서 실행).
+
+### 자동 중지
+
+`faers-gpu-idle-stop.timer`가 5분마다 검사해 **GPU 사용률 5% 미만 + Session Manager 세션 없음**이 **30분** 이어지면 인스턴스를 끈다(종료 동작이 "중지"라 삭제되지 않음).
+CPU 기준 경보(`faers-work`)를 쓰지 않는 이유: vLLM 추론 중에는 CPU가 거의 놀아 실행 중에 꺼진다.
+vLLM 서버만 떠 있고 요청이 없으면 유휴로 본다 — 켜 두고 잊는 게 가장 비싼 사고라서.
+
+```bash
+journalctl -t faers-gpu-idle-stop -n 20               # 판단 기록
+sudo touch /etc/faers-gpu-idle-stop.disabled          # 잠시 끄기(긴 다운로드 등). 다시 켜기: sudo rm 같은 파일
+```
+
+**끝나면 직접 중지한다**(EC2 → 인스턴스 상태 → 인스턴스 중지). 자동 중지는 안전장치일 뿐이다. **종료(terminate)는 누르지 않는다.**
+
+### 본 실행(Spot)
+
+세팅이 끝난 `faers-gpu`로 **이미지(AMI)를 만들고** 그 이미지로 g5.xlarge Spot을 띄운다(세팅 반복 없음).
+Spot은 2분 경고 후 회수될 수 있다 — 하네스는 part 단위로 S3에 저장하고 재실행하면 끝난 entity를 건너뛴다.
+
 ## 아직 안 한 것
 - `boaz_1234_user` 키 교체 (팀원 전환 후)
 - 팀원별 OS 계정 분리 (SSM Run As) — 필요해지면
 - B단계 컴퓨트(EMR Serverless)와 Glue Catalog 전환 — B 시작 직전. 지금 `hadoop` 카탈로그는 동시 쓰기에 안전하지 않다
-- GPU — C단계 3단계 커버리지 측정 결과가 나온 뒤에 판단
