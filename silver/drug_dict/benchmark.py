@@ -137,20 +137,23 @@ class TimedJudge:
         ))
         return d
 
-    def latency_stats(self) -> dict:
+    def latency_stats(self, wall_clock_s: float) -> dict:
+        """wall_clock_s: run_one()이 측정한 실제 경과 시간.
+        concurrency > 1이면 요청들이 겹쳐 실행되므로 latency 합산이 아닌
+        wall-clock 기준으로 rps를 계산해야 정확하다."""
         if not self.samples:
             return {}
         lats = [s.latency_s for s in self.samples]
         out_toks = [s.output_tokens for s in self.samples]
         total_out = sum(out_toks)
-        total_elapsed = sum(lats)
-        # TPOT: 출력 토큰 1개당 평균 시간 (decode 병목 측정 지표)
-        tpot_ms = (total_elapsed / total_out * 1000) if total_out else None
+        # TPOT: 출력 토큰 1개당 평균 시간 (decode 병목 측정 지표) — 순차 latency 기반
+        total_latency = sum(lats)
+        tpot_ms = (total_latency / total_out * 1000) if total_out else None
         lats_sorted = sorted(lats)
         n = len(lats_sorted)
         return {
             "n_calls": n,
-            "rps": round(n / total_elapsed, 3) if total_elapsed else None,
+            "rps": round(n / wall_clock_s, 3) if wall_clock_s else None,
             "latency_p50_s": round(lats_sorted[int(n * 0.50)], 3),
             "latency_p95_s": round(lats_sorted[min(int(n * 0.95), n - 1)], 3),
             "tpot_ms": round(tpot_ms, 2) if tpot_ms else None,
@@ -201,6 +204,7 @@ def run_one(
     label: str,
     price_per_hour: float,
     chunk_size: int,
+    top_k: int = 10,
     is_baseline: bool = False,
 ) -> RunResult:
     storage = h.LocalStorage(str(out_dir / label.replace("/", "_")))
@@ -213,6 +217,7 @@ def run_one(
     try:
         result.run_stats = h.run(
             entities, sources, judge, storage,
+            top_k=top_k,
             chunk_size=chunk_size,
             concurrency=result.concurrency,
         )
@@ -223,7 +228,7 @@ def run_one(
     result.elapsed_total_s = round(time.perf_counter() - t0, 1)
 
     if isinstance(judge, TimedJudge):
-        result.latency = judge.latency_stats()
+        result.latency = judge.latency_stats(result.elapsed_total_s)
         rps = result.latency.get("rps")
         result.cost_est = estimate_cost(len(entities), rps, price_per_hour)
 
@@ -353,7 +358,7 @@ def main(argv=None):
     print("\n[baseline] LLM 없는 Top-1 실행 중...")
     bl = run_one(entities, sources, Top1Judge(), gold, args.out_dir,
                  label="baseline_top1", price_per_hour=args.price_per_hour,
-                 chunk_size=args.chunk_size, is_baseline=True)
+                 chunk_size=args.chunk_size, top_k=args.top_k, is_baseline=True)
     all_results.append(bl)
     print(f"  auto_precision={bl.eval_result.get('auto_precision')} "
           f"cand_recall={bl.eval_result.get('cand_recall')} "
@@ -393,7 +398,7 @@ def main(argv=None):
 
                 r = run_one(entities, sources, judge, gold, args.out_dir,
                             label=label, price_per_hour=args.price_per_hour,
-                            chunk_size=args.chunk_size)
+                            chunk_size=args.chunk_size, top_k=args.top_k)
                 r.env_meta = env_meta
                 all_results.append(r)
                 ev, lat = r.eval_result, r.latency

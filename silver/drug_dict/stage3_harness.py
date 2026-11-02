@@ -670,22 +670,16 @@ def run(entities: list[Entity], sources: list, judge, storage, *, top_k: int = 1
         # ThreadPoolExecutor로 동시 호출. as_completed로 완료 순서대로 집계·저장.
         # 결과 순서와 무관하게 entity_id가 각 레코드에 들어 있어 finalize 단계에서 멱등.
         with ThreadPoolExecutor(max_workers=concurrency) as ex:
-            futures_list = []
-            for i in range(0, len(todo), chunk_size):
-                chunk = todo[i:i + chunk_size]
-                for s in sources:
-                    if hasattr(s, "prefetch"):
-                        s.prefetch([e.normalized for e in chunk])
-                futures_list.extend(ex.submit(process_one, e) for e in chunk)
-            futures = {f: None for f in futures_list}
             try:
-                for fut in as_completed(futures):
-                    collect(*fut.result())
+                for i in range(0, len(todo), chunk_size):
+                    chunk = todo[i:i + chunk_size]
+                    for s in sources:
+                        if hasattr(s, "prefetch"):
+                            s.prefetch([e.normalized for e in chunk])
+                    futures = {ex.submit(process_one, e): None for e in chunk}
+                    for fut in as_completed(futures):
+                        collect(*fut.result())
             except BaseException as err:
-                # KeyboardInterrupt(Spot 중단 2분 전 통지)·judge 재시도 소진 등 모든 예외에서
-                # 큐에 쌓인 future를 취소해야 한다. with 블록은 종료 시 제출된 모든 future를
-                # 기다리므로, 취소 안 하면 "실패했는데 수천 건을 더 돌리고 종료" — GPU 돈·시간
-                # 낭비. cancel()은 아직 시작 안 한 것만 중단(이미 돌고 있는 건 그대로 완료).
                 log(f"중단 ({type(err).__name__}) — 저장된 part는 보존, 대기 중 요청 취소")
                 for f in futures:
                     f.cancel()
