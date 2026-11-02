@@ -111,54 +111,12 @@ spark = build_spark("MyJob", driver_memory="8g")
 
 ## GPU 서버 (`faers-gpu`)
 
-C단계 3단계 LLM 판정(vLLM) 전용. **켜져 있는 동안 시간당 과금**이고 디스크(100GiB)는 중지해도 과금된다. 예산은 `faers-gpu` $50.
+C단계 3단계 LLM 판정(vLLM) 전용 서버. **사용법은 [`gpu/README.md`](gpu/README.md)** — 접속·실험·종료·자동 중지·Spot 본 실행·문제 해결.
 
-접속은 `faers-work`와 같다(EC2 → `faers-gpu` → **연결 → Session Manager**, SSH 없음).
-**접속하면 먼저 `bash -l`** — Ubuntu에서 Session Manager 기본 셸은 `sh`라 `source`가 없고 환경변수(`/etc/profile.d/faers-gpu.sh`)도 안 읽힌다.
-그다음 홈으로 이동 후 본인 폴더에 clone(명령은 한 줄씩 붙여넣기 — 여러 줄을 한 번에 붙이면 줄이 이어 붙는다):
-
-```bash
-bash -l
-cd ~ && mkdir -p ~/본인이름 && cd ~/본인이름
-git clone https://github.com/BOAZ-1234/faers-pipeline.git && cd faers-pipeline   # 이후엔 git pull
-```
-
-**서버를 새로 만들었을 때만** 세팅한다(디스크에 남아 중지/시작해도 다시 할 필요 없음):
-
-```bash
-bash infra/gpu/setup_gpu.sh        # Python 3.12 venv(/opt/faers-gpu-venv) + vLLM + 하네스 의존성 + 자동 중지 타이머
-```
-
-**작업할 때마다**:
-
-```bash
-source /opt/faers-gpu-venv/bin/activate
-bash infra/gpu/fetch_artifacts.sh                                   # 사전·잔여·FAISS 받기(이미 있으면 건너뜀)
-tmux new -s vllm                                                    # 세션 닫혀도 서버 유지
-bash infra/gpu/serve_vllm.sh Qwen/Qwen2.5-7B-Instruct-AWQ          # 127.0.0.1:8000. 모델 바꿀 땐 Ctrl+C 후 재실행
-# Ctrl+B, D 로 tmux 빠져나와서 다른 창에서 하네스·benchmark 실행 (기본 base-url이 이 서버)
-```
-
-- DiAna dev 정답지(`silver/drug_dict/golden/output/diana_golden_dev.csv`)는 **팀 공용 파일을 받아 둔다.** 빈도 필터 없이 새로 만들면 다른 정답지가 돼 점수 비교가 안 된다.
-- 하네스 결과를 S3에 남길 때는 `--out s3://boaz-1234-825494477740-ap-northeast-2-an/stage3/<실행이름>` (Spot 중단 시 이어서 실행).
-
-### 자동 중지
-
-`faers-gpu-idle-stop.timer`가 5분마다 검사해 **GPU 사용률 5% 미만 + Session Manager 세션 없음**이 **30분** 이어지면 인스턴스를 끈다(종료 동작이 "중지"라 삭제되지 않음).
-CPU 기준 경보(`faers-work`)를 쓰지 않는 이유: vLLM 추론 중에는 CPU가 거의 놀아 실행 중에 꺼진다.
-vLLM 서버만 떠 있고 요청이 없으면 유휴로 본다 — 켜 두고 잊는 게 가장 비싼 사고라서.
-
-```bash
-journalctl -t faers-gpu-idle-stop -n 20               # 판단 기록
-sudo touch /etc/faers-gpu-idle-stop.disabled          # 잠시 끄기(긴 다운로드 등). 다시 켜기: sudo rm 같은 파일
-```
-
-**끝나면 직접 중지한다**(EC2 → 인스턴스 상태 → 인스턴스 중지). 자동 중지는 안전장치일 뿐이다. **종료(terminate)는 누르지 않는다.**
-
-### 본 실행(Spot)
-
-세팅이 끝난 `faers-gpu`로 **이미지(AMI)를 만들고** 그 이미지로 g5.xlarge Spot을 띄운다(세팅 반복 없음).
-Spot은 2분 경고 후 회수될 수 있다 — 하네스는 part 단위로 S3에 저장하고 재실행하면 끝난 entity를 건너뛴다.
+- **켜져 있는 동안 시간당 과금**, 디스크(100GiB)는 중지해도 과금. 예산 `faers-gpu` $50(팀 전체)
+- 접속은 `faers-work`와 같은 Session Manager. Ubuntu라 **접속 후 먼저 `bash -l`**
+- GPU 유휴(사용률 5% 미만 + 접속 없음) 30분이면 자동 중지 — CPU 기준 경보는 vLLM 추론 중 CPU가 낮아 쓰지 않음
+- 세팅 스크립트: `gpu/setup_gpu.sh`(서버 새로 만들 때만), `gpu/fetch_artifacts.sh`, `gpu/serve_vllm.sh`, `gpu/gpu_idle_stop.sh`
 
 ## 아직 안 한 것
 - `boaz_1234_user` 키 교체 (팀원 전환 후)
