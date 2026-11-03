@@ -18,9 +18,14 @@ clean-targets: ['target', 'dbt_packages']
 # b_stage/는 C→B·D 경계가 아니라 B단계 자체(SILVER-2 "펼치기")의 그레인 계약이다
 # — "한 행이 뭘 의미하는지"를 1주차에 못 박는 것(4-4). staging/의 성분·부작용
 # 사전과는 성격이 달라 폴더를 분리했다.
+#
+# gold/는 B단계 GOLD 집계(4칸·IC025, 4-5)다 — b_stage(그레인) 위에서 계산되는
+# 다음 층이라 또 분리.
 models:
   faers_contract:
     staging:
       +materialized: table
     b_stage:
+      +materialized: table
+    gold:
       +materialized: table

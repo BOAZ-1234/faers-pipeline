@@ -1,0 +1,77 @@
+version: 2
+
+# ── GOLD 집계 계약 ────────────────────────────────────────────────────────
+# project-plan.html §4-5 "집계 — 조합마다 세지 않는다"의 산출물 스키마를 고정한다.
+# 이 모델 자체가 가장자리 합 트릭(3번 스캔)으로 2×2표 + IC025를 계산하는 로직이라
+# (B단계 그레인과 달리) "형식"보다 "계산이 맞는가"가 계약의 핵심이다 — tests/의
+# assert_gold_* 가 seed로 손으로 계산한 값과 실제 산출을 대조한다.
+#
+# 게이트(IC025>0 AND a>=3) 판정·필터·랭킹은 여기서 안 한다 — D단계 몫(§4-7).
+# 이 모델은 "조합마다 점수가 얼마인가"까지만 낸다.
+
+models:
+  - name: fct_signal_scores
+    description: >
+      GOLD — 약물(ingredient_set) × 반응(pt) 조합마다 2×2표(a/b/c/d)와 IC025.
+      모집단은 B단계 그레인 결정(role_cod PS/SS만·최신 caseversion만·미해결 제외)을
+      그대로 따른다. 조합 수와 무관하게 전체 스캔 3번으로 계산(가장자리 합 트릭).
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: ingredient_set
+        description: "성분 묶음(§5-1 표준: 소문자·정렬·파이프). 미해결 약물명은 이미 제외됨."
+        data_type: varchar
+        constraints:
+          - type: not_null
+      - name: pt
+        description: "FAERS 반응 원본 표준용어(MedDRA PT), 변환 없음."
+        data_type: varchar
+        constraints:
+          - type: not_null
+      - name: a
+        description: "동시출현 신고수 — 이 약물 조합과 이 반응이 같은 case에 같이 나온 건수."
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: b
+        description: "이 약물 조합은 나왔지만 이 반응은 아닌 신고수."
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: c
+        description: "이 반응은 나왔지만 이 약물 조합은 아닌 신고수."
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: d
+        description: "둘 다 아닌 나머지 신고수."
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: n_total
+        description: "모집단 전체 신고수(= a+b+c+d). 같은 ingredient_set·pt 행이라도 전부 동일."
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: expected_count
+        description: "E = (a+b)(a+c)/N — 우연히 같이 나왔다면 기대되는 동시출현 수."
+        data_type: double
+        constraints:
+          - type: not_null
+      - name: ic
+        description: "IC = log2((a+0.5)/(E+0.5)) — 실제가 기대의 몇 배인가."
+        data_type: double
+        constraints:
+          - type: not_null
+      - name: ic025
+        description: "IC - 표본크기 페널티. 신호 판정 기준(IC025>0)은 D단계가 적용(§4-7)."
+        data_type: double
+        constraints:
+          - type: not_null
+      - name: ror
+        description: "참고 저장용(§4-5). 판정·정렬에는 안 씀. b=0이면 무한/NULL 가능."
+        data_type: double
+      - name: prr
+        description: "참고 저장용(§4-5). 판정·정렬에는 안 씀."
+        data_type: double

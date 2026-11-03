@@ -10,3 +10,5 @@ caseid,primaryid,caseversion,fda_dt,role_cod,ingredient_set,unii,pt
 90010004,900100041,1,20180505,I,clarithromycin,H1250JIK0A,Respiratory depression
 90010005,900100051,1,20190301,PS,zoledronic acid,,Osteonecrosis of jaw
 90010006,900100061,1,20200115,PS,insulin glargine,,Hypoglycaemia
+90010007,900100071,1,20210101,PS,ibuprofen,,Acute kidney injury
+90010007,900100072,2,20210615,PS,naproxen,,Acute kidney injury

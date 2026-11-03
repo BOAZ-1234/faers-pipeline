@@ -7,7 +7,8 @@ C→B·D 경계의 조인키 *계약* + B단계 자체의 그레인 *계약*을 
 **테이블 만드는 시점(`dbt build`)에 검사**해 어긋나면 빌드를 실패시킨다.
 
 `models/staging/`은 C단계 사전(조인키 형식)을, `models/b_stage/`는 B단계 SILVER-2
-"펼치기"의 그레인(한 행이 뭘 의미하는지, 4-4)을 계약한다 — 성격이 달라 폴더를 분리했다.
+"펼치기"의 그레인(한 행이 뭘 의미하는지, 4-4)을, `models/gold/`는 B단계 GOLD 집계
+(4칸·IC025, 4-5)를 계약한다 — 성격이 달라 폴더를 분리했다.
 
 ## C단계 사전 두 개 → 어디서 쓰나
 
@@ -53,6 +54,9 @@ contracts/dbt/
 ├─ models/b_stage/                  # B단계(SILVER-2) 그레인 계약
 │  ├─ fct_case_drug_reaction.sql    # [B단계] contract enforced
 │  └─ schema.yml                    # ★ 계약: 컬럼 타입·제약
+├─ models/gold/                     # B단계 GOLD 집계(4칸·IC025) 계약
+│  ├─ fct_signal_scores.sql         # [GOLD] contract enforced — 가장자리 합 트릭
+│  └─ schema.yml                    # ★ 계약: 컬럼 타입·제약
 └─ tests/                           # 형식 계약(단일 테스트)
    ├─ assert_resolved_ingredient_set_format.sql   # [성분] 소문자·파이프 경계 공백없음
    ├─ assert_ingredient_set_sorted.sql            # [성분] 알파벳 정렬
@@ -63,7 +67,8 @@ contracts/dbt/
    ├─ assert_case_ingredient_set_format.sql       # [B단계] 소문자·파이프 경계 공백없음
    ├─ assert_case_ingredient_set_sorted.sql       # [B단계] 알파벳 정렬
    ├─ assert_case_unii_length.sql                  # [B단계] 10자 또는 빈값
-   └─ assert_fda_dt_format.sql                     # [B단계] YYYYMMDD 8자리
+   ├─ assert_fda_dt_format.sql                     # [B단계] YYYYMMDD 8자리
+   └─ assert_gold_cells_sum_to_total.sql           # [GOLD] a+b+c+d = n_total
 ```
 
 > `seeds/*.csv`는 지금 **샘플 픽스처**임. 실제로는 C단계 산출·A단계 FAERS 원본을
@@ -103,6 +108,29 @@ SILVER-2 "펼치기"는 **신고(case) 1건의 약물 1개 × 반응 1개 = 1행
 | 부작용(pt) | `pt` 원형 그대로, 변환·묶음 없음 | (변환 자체가 없음 — 4-3) |
 | 중복 ingredient_set | — | GOLD 집계 쿼리가 `COUNT(DISTINCT caseid)` |
 
+## GOLD 집계(`fct_signal_scores`) — 가장자리 합 트릭
+
+조합(약물×반응)마다 2×2표를 직접 세면 조합 수 × 4번 스캔이 필요하다(4-5). 대신
+`fct_case_drug_reaction`을 **딱 3번만** 스캔해서 가장자리 합(a, a+b, a+c, N)을
+구하고 나머지(b, c, d)는 뺄셈으로 유도한다 — 조합 수와 무관하게 비용이 고정된다.
+
+모집단(N) 정의는 B단계 그레인 결정을 그대로 가져온다: `role_cod IN ('PS','SS')`·
+미해결 약물명 제외·case당 최신 `caseversion`만. **이 필터를 a/a+b/a+c/N 네 값
+전부에 동일하게** 적용해야 2×2표가 내부적으로 일관된다.
+
+검증은 seed로 손으로 계산한 값과 대조했다 — toy 데이터(a=1, a+b=1, a+c=1, N=6)
+기준 `IC025 = -2.6132`가 `dbt show`로 뽑은 실제 값과 소수 4자리까지 일치. 또한
+"최신 caseversion만" 로직이 실제로 작동하는지는, 같은 case가 버전마다 **다른**
+약물로 바뀌는 시나리오(1차 신고 `ibuprofen` → 정정 `naproxen`)를 seed에 추가해서
+직접 확인 — 결과엔 `naproxen`만 나오고 `ibuprofen`은 전혀 안 나온다(최신판으로
+완전히 대체됐다는 뜻).
+
+게이트 판정(`IC025 > 0` 그리고 `a ≥ 3`)·필터·랭킹은 여기서 안 한다 — D단계
+몫(4-7). 이 모델은 "조합마다 점수가 얼마인가"까지만 낸다. `ROR`·`PRR`도 계산
+비용이 거의 0이라 같이 저장하지만 판정·정렬엔 안 쓰고, 연속성 보정이 없어
+`b=0`이나 `d=0`이면 그대로 무한/NULL이 나올 수 있다(알려진 한계, seed에서도
+관측됨).
+
 ## 실행
 
 ```bash
@@ -112,7 +140,7 @@ pip install dbt-duckdb
 PYTHONUTF8=1 dbt build --project-dir contracts/dbt --profiles-dir contracts/dbt
 ```
 
-`dbt build` = seed 적재 → 계약모델 생성(타입·제약 강제) → 테스트 실행. 전부 통과하면 `PASS=20`.
+`dbt build` = seed 적재 → 계약모델 생성(타입·제약 강제) → 테스트 실행. 전부 통과하면 `PASS=22`.
 지금은 로컬에서 이 명령으로 검증한다(CI는 아래 '다음 단계' 참고).
 
 ## 계약이 실제로 막는지 확인 (깨보기)
@@ -134,8 +162,13 @@ seed에서 한 값을 일부러 어긋내고 다시 `dbt build`:
 | B단계 | `carbidopa\|levodopa` → `levodopa\|carbidopa` (순서) | `assert_case_ingredient_set_sorted` FAIL (직접 확인, 2026-10-07) |
 | B단계 | `UF599785JZ` → `UF599785J` (UNII 9자) | `assert_case_unii_length` FAIL |
 | B단계 | `fda_dt`를 `2015-03-31`처럼 하이픈 포함으로 바꿈 | `assert_fda_dt_format` FAIL |
+| GOLD | `d` 계산식에서 `+ p.a` 항을 빼서(수식 버그) a+b+c+d ≠ n_total 유도 | `assert_gold_cells_sum_to_total` FAIL |
 
 → `dbt build`가 `ERROR`로 멈추고 테이블을 내보내지 않는다. (확인 후 값 복구)
+
+> 이 항등식은 seed 값을 바꿔서는 못 깬다 — `d`를 뺄셈으로 유도하는 공식 자체에서
+> 항상 성립하도록 만들어졌기 때문이다(수학적 항등식). 그래서 위 표의 다른 행들과
+> 달리 **SQL 공식에 일부러 버그를 넣어서** 테스트가 잡는지 확인했다.
 
 ## 계약 요약 (schema.yml)
 
@@ -156,6 +189,13 @@ seed에서 한 값을 일부러 어긋내고 다시 `dbt build`:
 - role_cod 값 집합(accepted_values)은 **걸지 않음** — 실데이터에 `PS/SS/C/I` 외에 `DN`·빈값도
   소량 관측돼서(실측 2026-10-07, 84,587,800행 중 `DN` 881행·빈값 6행), 뜻을 확인 전까지는
   거짓으로 제약을 걸지 않는다.
+
+**GOLD 집계 (fct_signal_scores)**
+- 타입·제약: `ingredient_set`·`pt`·`a`·`b`·`c`·`d`·`n_total`·`expected_count`·`ic`·`ic025` 전부
+  not_null(`ror`·`prr`는 무한/NULL 가능해 제외).
+- 계산 정합성(tests/): `a+b+c+d = n_total`(가장자리 합 유도가 맞았다는 불변식). seed로
+  손으로 계산한 IC025(-2.6132)와 실제 산출 대조, caseversion 최신판 로직도 버전마다
+  다른 약물로 바뀌는 시나리오로 직접 검증(위 GOLD 집계 섹션 참고).
 
 ### accepted_values · relationships 란 (dbt 기본 테스트)
 
@@ -180,8 +220,10 @@ seed에서 한 값을 일부러 어긋내고 다시 `dbt build`:
 - [ ] seed → 실제 C단계 산출 `source`로 교체 (성분: resolution/candidate · 부작용: reaction_dict)
 - [ ] `fct_case_drug_reaction` seed → 실제 A단계 FAERS 원본(`faers_demo`/`faers_drug`/`faers_reac`,
       `primaryid` 조인) + C단계 `stg_resolution`(`ingredient_set`·`unii`) 조인으로 교체
-- [ ] GOLD 집계 쿼리(세부1/리드) — role_cod `IN ('PS','SS')` 필터, caseid별 caseversion
-      최신판(또는 as_of 기준 최신) 선택, `COUNT(DISTINCT caseid)` 기반 가장자리 합 트릭(4-5) 구현
+- [x] GOLD 집계 쿼리(`fct_signal_scores`) — role_cod `IN ('PS','SS')` 필터, caseid별
+      caseversion 최신판 선택, `COUNT(DISTINCT caseid)` 기반 가장자리 합 트릭(4-5) 구현
+- [ ] GOLD는 지금 "전역 최신판"만 지원 — 시점 재현(§4-6, "as_of 기준 최신")은 별도 작업
+- [ ] D단계 게이트(IC025>0·a≥3)·필터·랭킹에서 `fct_signal_scores`를 소비하는 쪽 연결
 - [ ] `role_cod` 값 `DN`의 의미 확인 — 공식 FAERS 코드북에 없어 보임(실측상 극소량, 0.00%)
 - [ ] 상류 `silver/reaction_dict/` 컬럼명(`signal`/`pt_set`)을 계획서 키로 맞출지 함하경과 확정
       (지금은 이 계약의 staging에서 alias로 통일 중)
