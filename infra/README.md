@@ -19,7 +19,7 @@
 | EC2 | `faers-work` (`i-09ea3552c292bd78c`) | m5.xlarge(4코어/16GB), Amazon Linux 2023, gp3 30GiB |
 | CloudWatch 경보 | `faers-work-idle-stop` | CPU 평균 3% 미만이 2시간 이어지면 서버 자동 중지 |
 | Budgets | `faers-gpu` | 월 $50 (실제 50·80·100% 알림) — GPU 실험 예산 (2026-10-22 회의) |
-| IAM 정책 변경 | `faers-team-s3` | `stage3/*` 쓰기 추가 — 하네스 결과(part) 저장. 삭제 권한은 일부러 없음 |
+| IAM 정책 변경 | `faers-team-s3` | `iceberg_warehouse/stage_c_silver/stage3/*` 쓰기 추가 — 하네스 결과(part) 저장. 삭제 권한은 일부러 없음 |
 | EC2 | `faers-gpu` (`i-08b3cf5ddb7dadc21`) | g6.xlarge(NVIDIA L4 24GB), Deep Learning OSS Nvidia Driver AMI(Ubuntu 26.04), gp3 100GiB, 역할 `faers-ec2-role`, 태그 `Project=faers-pipeline`, 인바운드 0개, 종료 방지·종료 동작 "중지". 아래 [GPU 서버](#gpu-서버-faers-gpu) |
 | 서비스 할당량 | G·VT 계열 | 온디맨드 8 vCPU / Spot 8 vCPU (2026-10-17 신청·승인) |
 

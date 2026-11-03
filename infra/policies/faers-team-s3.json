@@ -12,6 +12,6 @@
      "Resource": "arn:aws:s3:::boaz-1234-825494477740-ap-northeast-2-an/iceberg_warehouse/stage_b_silver/*"},
     {"Effect": "Allow",
      "Action": ["s3:PutObject", "s3:AbortMultipartUpload"],
-     "Resource": "arn:aws:s3:::boaz-1234-825494477740-ap-northeast-2-an/stage3/*"}
+     "Resource": "arn:aws:s3:::boaz-1234-825494477740-ap-northeast-2-an/iceberg_warehouse/stage_c_silver/stage3/*"}
   ]
 }

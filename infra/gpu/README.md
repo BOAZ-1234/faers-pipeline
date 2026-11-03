@@ -7,7 +7,7 @@ C단계 3단계(이름 통일) **LLM 판정**을 돌리는 서버. 처음 쓰는
 | 인스턴스 | `faers-gpu` (`i-08b3cf5ddb7dadc21`), g6.xlarge, **NVIDIA L4 24GB**, RAM 16GB |
 | OS | Deep Learning OSS Nvidia Driver AMI (Ubuntu 26.04) |
 | 파이썬 | `/opt/faers-gpu-venv` (Python 3.12, vLLM 0.33.0, torch 2.14) — OS 파이썬 쓰지 않음 |
-| 권한 | 역할 `faers-ec2-role` (S3 읽기, `stage3/` 쓰기). 키 없음 |
+| 권한 | 역할 `faers-ec2-role` (S3 읽기, `iceberg_warehouse/stage_c_silver/stage3/` 쓰기). 키 없음 |
 | 접속 | Session Manager만 (SSH·인바운드 포트 없음) |
 | 예산 | Budgets `faers-gpu` **월 $50 (팀 전체)** |
 
@@ -101,7 +101,8 @@ bash infra/gpu/serve_vllm.sh Qwen/Qwen2.5-7B-Instruct-AWQ
 | vLLM 화면 다시 보기 | `tmux attach -t vllm` |
 | 모델 바꾸기 | `tmux attach -t vllm` → **Ctrl+C** → 다른 모델로 `serve_vllm.sh` 재실행 |
 | vLLM 끄기 | `tmux attach -t vllm` → **Ctrl+C** → `exit` |
-| 문맥 길이 늘리기 | `MAX_MODEL_LEN=8192 bash infra/gpu/serve_vllm.sh <모델>` |
+| 문맥 길이 늘리기 | `MAX_MODEL_LEN=8192 bash infra/gpu/serve_vllm.sh <모델>` (기본 4096 — 2048은 실데이터 0.2~0.7%가 넘침) |
+| 동시 처리 상한 바꾸기 | `MAX_NUM_SEQS=32 bash infra/gpu/serve_vllm.sh <모델>` (기본 64, prefix caching 기본 켜짐) |
 
 비교 대상 모델(10/22 회의): `Qwen/Qwen2.5-3B-Instruct`, `Qwen/Qwen2.5-7B-Instruct-AWQ`, `Qwen/Qwen2.5-14B-Instruct-AWQ` — L4 24GB에 각각 단독으로 올라간다.
 
@@ -136,7 +137,7 @@ python silver/drug_dict/stage3_harness.py evaluate --out out/<실행이름> --go
 python silver/drug_dict/stage3_harness.py finalize --out out/<실행이름> --dest out/<실행이름>/final
 ```
 
-**결과를 S3에 남기기** — `--out s3://boaz-1234-825494477740-ap-northeast-2-an/stage3/<실행이름>` 로 주면 part가 S3에 쌓인다(서버 디스크와 무관하게 보존, 중단돼도 같은 명령 재실행 시 이어서 함). `stage3/`은 쓰기만 되고 삭제는 안 된다.
+**결과를 S3에 남기기** — `--out s3://boaz-1234-825494477740-ap-northeast-2-an/iceberg_warehouse/stage_c_silver/stage3/<실행이름>` 로 주면 part가 S3에 쌓인다(서버 디스크와 무관하게 보존, 중단돼도 같은 명령 재실행 시 이어서 함). 이 경로는 쓰기만 되고 삭제는 안 된다(B단계 `stage_b_silver/`와 같은 층 구조).
 
 ---
 
@@ -171,7 +172,7 @@ sudo touch /etc/faers-gpu-idle-stop.disabled     # 잠시 끄기(긴 다운로�
 
 1. `faers-gpu`가 원하는 상태(모델 캐시 포함)일 때 → **작업 → 이미지 및 템플릿 → 이미지 생성** (이름 `faers-gpu-ami-YYYYMMDD`)
 2. 그 AMI로 **인스턴스 시작**: 유형 **g5.xlarge**(A10G 24GB), 역할 `faers-ec2-role`, 보안 그룹 `faers-gpu-sg`, 키 페어 없음, **태그 `Project=faers-pipeline`**(이게 있어야 팀원이 켜고 끔), 고급 → 구매 옵션 **스팟 인스턴스**
-3. 접속 → §3·§4 → 하네스를 **`--out s3://…/stage3/<본실행이름>`** 로 실행
+3. 접속 → §3·§4 → 하네스를 **`--out s3://…/iceberg_warehouse/stage_c_silver/stage3/<본실행이름>`** 로 실행
 4. Spot은 **2분 예고 후 회수**될 수 있다. 회수되면 새 Spot을 띄워 **같은 명령을 다시 실행** → S3에 저장된 part의 entity는 건너뛰고 이어서 한다(손실은 최대 한 청크 200개).
 5. 끝나면 Spot 인스턴스는 **종료**해도 된다(결과는 S3에 있음). `faers-gpu` 원본은 중지 상태로 둔다.
 
