@@ -12,12 +12,16 @@
 |---|---|---|
 | Budgets | `boaz-faers-projects` | 월 $15 예산 알림 |
 | IAM 정책 | `faers-team-s3` | S3 읽기 + `stage_b_silver`만 쓰기 (bronze는 읽기 전용) — [`policies/faers-team-s3.json`](policies/faers-team-s3.json) |
-| IAM 정책 | `faers-team-ec2` | 작업 서버 1대 시작/중지/SSM 접속 — [`policies/faers-team-ec2.json`](policies/faers-team-ec2.json) |
+| IAM 정책 | `faers-team-ec2` | 태그 `Project=faers-pipeline`이 붙은 인스턴스 시작/중지/SSM 접속 (`faers-work`·`faers-gpu`). 새 인스턴스는 이 태그만 붙이면 된다 — [`policies/faers-team-ec2.json`](policies/faers-team-ec2.json) |
 | IAM 정책 | `faers-team-selfkeys` | 팀원이 **본인** 액세스 키만 만들고 지울 수 있음 (`${aws:username}`으로 본인 계정에 한정) — [`policies/faers-team-selfkeys.json`](policies/faers-team-selfkeys.json) |
 | IAM 그룹 | `faers-team` | 위 세 정책 연결, 팀원 사용자를 여기에 넣는다 |
 | IAM 역할 | `faers-ec2-role` | 서버가 쓰는 역할: `faers-team-s3` + `AmazonSSMManagedInstanceCore` |
 | EC2 | `faers-work` (`i-09ea3552c292bd78c`) | m5.xlarge(4코어/16GB), Amazon Linux 2023, gp3 30GiB |
 | CloudWatch 경보 | `faers-work-idle-stop` | CPU 평균 3% 미만이 2시간 이어지면 서버 자동 중지 |
+| Budgets | `faers-gpu` | 월 $50 (실제 50·80·100% 알림) — GPU 실험 예산 (2026-10-22 회의) |
+| IAM 정책 변경 | `faers-team-s3` | `iceberg_warehouse/stage_c_silver/stage3/*` 쓰기 추가 — 하네스 결과(part) 저장. 삭제 권한은 일부러 없음 |
+| EC2 | `faers-gpu` (`i-08b3cf5ddb7dadc21`) | g6.xlarge(NVIDIA L4 24GB), Deep Learning OSS Nvidia Driver AMI(Ubuntu 26.04), gp3 100GiB, 역할 `faers-ec2-role`, 태그 `Project=faers-pipeline`, 인바운드 0개, 종료 방지·종료 동작 "중지". 아래 [GPU 서버](#gpu-서버-faers-gpu) |
+| 서비스 할당량 | G·VT 계열 | 온디맨드 8 vCPU / Spot 8 vCPU (2026-10-17 신청·승인) |
 
 기존 `boaz_1234_user`(액세스 키 방식)는 파이프라인용으로 남아 있다. 팀원이 새 방식으로 옮겨간 뒤 **키를 교체(rotate)** 한다.
 
@@ -105,8 +109,16 @@ spark = build_spark("MyJob", driver_memory="8g")
 
 `bronze/CLAUDE.md`의 조회 비용 규칙(기본 10건, 그 이상은 확인 후)은 서버에서도 그대로 적용된다.
 
+## GPU 서버 (`faers-gpu`)
+
+C단계 3단계 LLM 판정(vLLM) 전용 서버. **사용법은 [`gpu/README.md`](gpu/README.md)** — 접속·실험·종료·자동 중지·Spot 본 실행·문제 해결.
+
+- **켜져 있는 동안 시간당 과금**, 디스크(100GiB)는 중지해도 과금. 예산 `faers-gpu` $50(팀 전체)
+- 접속은 `faers-work`와 같은 Session Manager. Ubuntu라 **접속 후 먼저 `bash -l`**
+- GPU 유휴(사용률 5% 미만 + 접속 없음) 30분이면 자동 중지 — CPU 기준 경보는 vLLM 추론 중 CPU가 낮아 쓰지 않음
+- 세팅 스크립트: `gpu/setup_gpu.sh`(서버 새로 만들 때만), `gpu/fetch_artifacts.sh`, `gpu/serve_vllm.sh`, `gpu/gpu_idle_stop.sh`
+
 ## 아직 안 한 것
 - `boaz_1234_user` 키 교체 (팀원 전환 후)
 - 팀원별 OS 계정 분리 (SSM Run As) — 필요해지면
 - B단계 컴퓨트(EMR Serverless)와 Glue Catalog 전환 — B 시작 직전. 지금 `hadoop` 카탈로그는 동시 쓰기에 안전하지 않다
-- GPU — C단계 3단계 커버리지 측정 결과가 나온 뒤에 판단
