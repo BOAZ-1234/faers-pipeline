@@ -53,6 +53,23 @@ from build_map import DICTIONARY_VERSION
 MAP_DEFAULT = HERE / "drug_ingredient_map.csv"
 OUT_DIR = HERE / "output"
 
+
+def collapse_ingredient_alias(alias: str, iset: str) -> str:
+    """성분명 별칭이 복합제 묶음을 달고 있으면 그 성분 하나로 바꾼다.
+
+    사전에서 별칭을 뽑을 때 복합제 행의 성분명(AMLODIPINE)에도 그 행의 묶음
+    (amlodipine|hydrochlorothiazide|olmesartan)이 붙는 문제(실측 130,963개 중 5,665개).
+    별칭이 묶음의 원소 자체면 그 성분 하나가 맞다.
+    브랜드 별칭(SYMBICORT → budesonide|formoterol)은 원소가 아니라 그대로 둔다."""
+    from build_map import normalize_ingredient
+    parts = [p.strip() for p in iset.split("|") if p.strip()]
+    if len(parts) < 2:
+        return iset
+    for a in (alias.strip().lower(), normalize_ingredient(alias).lower()):
+        if a in parts:
+            return a
+    return iset
+
 MODEL_IDS = {
     "e5": "intfloat/e5-small-v2",
     "sapbert": "cambridgeltl/SapBERT-from-PubMedBERT-fulltext",
@@ -70,7 +87,13 @@ def extract_aliases(map_path: Path) -> list[dict]:
     """drug_ingredient_map.csv → [{alias, ingredient_set}, ...]
 
     alias별 정답 ingredient_set을 보존한다. 같은 alias가 여러 행에 나오면
-    먼저 등장한 행의 ingredient_set을 채택 (출처 우선순위 따름)."""
+    먼저 등장한 행의 ingredient_set을 채택 (출처 우선순위 따름).
+
+    복합제 보정: 성분명 별칭(ingr_norm 또는 iset 원소)이 복합제 묶음을 달고
+    있으면 그 성분 하나로 바꾼다. 사전에서 별칭을 뽑을 때 복합제 행의 성분명
+    AMLODIPINE에도 그 행의 묶음(amlodipine|hydrochlorothiazide|olmesartan)이
+    붙는 문제(실측 130,963개 중 5,665개)를 build 시점에 바로잡는다. 브랜드
+    별칭(SYMBICORT → budesonide|formoterol)은 묶음의 원소가 아니라 그대로 둔다."""
     seen: dict[str, str] = {}  # alias → ingredient_set (첫 등장 우선)
     rows = []
 
@@ -101,8 +124,8 @@ def extract_aliases(map_path: Path) -> list[dict]:
             for alias in candidates:
                 alias = alias.strip()
                 if alias and alias not in seen:
-                    seen[alias] = iset
-                    rows.append({"alias": alias, "ingredient_set": iset})
+                    seen[alias] = collapse_ingredient_alias(alias, iset)
+                    rows.append({"alias": alias, "ingredient_set": seen[alias]})
 
     return rows
 
