@@ -670,6 +670,7 @@ def run(entities: list[Entity], sources: list, judge, storage, *, top_k: int = 1
         # ThreadPoolExecutor로 동시 호출. as_completed로 완료 순서대로 집계·저장.
         # 결과 순서와 무관하게 entity_id가 각 레코드에 들어 있어 finalize 단계에서 멱등.
         with ThreadPoolExecutor(max_workers=concurrency) as ex:
+            futures: dict = {}
             try:
                 for i in range(0, len(todo), chunk_size):
                     chunk = todo[i:i + chunk_size]

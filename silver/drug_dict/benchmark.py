@@ -58,7 +58,7 @@ def collect_env_meta(base_url: str, model: str, price_per_hour: float) -> dict:
     # vLLM /version 엔드포인트
     try:
         import urllib.request
-        with urllib.request.urlopen(base_url.rstrip("/").rstrip("/v1") + "/version", timeout=5) as r:
+        with urllib.request.urlopen(base_url.rstrip("/").removesuffix("/v1") + "/version", timeout=5) as r:
             meta["vllm_version"] = json.loads(r.read()).get("version", "unknown")
     except Exception:
         meta["vllm_version"] = "unknown"
@@ -165,14 +165,15 @@ class TimedJudge:
 # ── 비용 추정 ─────────────────────────────────────────────────────────────────
 
 def estimate_cost(n_entities: int, rps: float | None, price_per_hour: float,
+                  n_op: int = 132_450,
                   retry_factor: float = 1.2) -> dict:
     if not rps:
         return {}
     gpu_hours = n_entities / rps / 3600
     cost_usd = gpu_hours * price_per_hour * retry_factor
     return {
-        "est_gpu_hours_for_147k": round(147_718 / rps / 3600, 2),
-        "est_cost_usd_for_147k": round(147_718 / rps / 3600 * price_per_hour * retry_factor, 2),
+        "est_gpu_hours_for_op": round(n_op / rps / 3600, 2),
+        "est_cost_usd_for_op": round(n_op / rps / 3600 * price_per_hour * retry_factor, 2),
         "cost_per_1k_entities_usd": round(cost_usd / n_entities * 1000, 4) if n_entities else None,
     }
 
@@ -206,6 +207,7 @@ def run_one(
     chunk_size: int,
     top_k: int = 10,
     is_baseline: bool = False,
+    _total_op_entities: int = 132_450,
 ) -> RunResult:
     storage = h.LocalStorage(str(out_dir / label.replace("/", "_")))
     result = RunResult(label=label, model=getattr(judge, "model", "baseline"),
@@ -230,7 +232,8 @@ def run_one(
     if isinstance(judge, TimedJudge):
         result.latency = judge.latency_stats(result.elapsed_total_s)
         rps = result.latency.get("rps")
-        result.cost_est = estimate_cost(len(entities), rps, price_per_hour)
+        result.cost_est = estimate_cost(len(entities), rps, price_per_hour,
+                                        n_op=_total_op_entities)
 
     return result
 
@@ -336,9 +339,12 @@ def main(argv=None):
                 if e.n_reports >= args.min_reports]
     gold, scope = h.load_stage3_gold(args.gold, args.unmatched)
     entities = [e for e in entities if h.gold_for_entity(e, gold)]
+    # --limit 전의 크기 = 운영 시 실제 처리 entity 수 (비용 추정 분모)
+    n_op_entities = len(entities)
     if args.limit:
         entities = entities[:args.limit]
-    print(f"평가 대상 entity: {len(entities):,}개 (leakage 방지 교집합, scope: {scope})")
+    print(f"평가 대상 entity: {len(entities):,}개 (leakage 방지 교집합, scope: {scope})"
+          + (f" / 운영 규모 추정용: {n_op_entities:,}개" if args.limit else ""))
 
     # 후보 소스 (공통)
     sources: list = []
@@ -358,7 +364,8 @@ def main(argv=None):
     print("\n[baseline] LLM 없는 Top-1 실행 중...")
     bl = run_one(entities, sources, Top1Judge(), gold, args.out_dir,
                  label="baseline_top1", price_per_hour=args.price_per_hour,
-                 chunk_size=args.chunk_size, top_k=args.top_k, is_baseline=True)
+                 chunk_size=args.chunk_size, top_k=args.top_k, is_baseline=True,
+                 _total_op_entities=n_op_entities)
     all_results.append(bl)
     print(f"  auto_precision={bl.eval_result.get('auto_precision')} "
           f"cand_recall={bl.eval_result.get('cand_recall')} "
@@ -382,9 +389,11 @@ def main(argv=None):
 
     env_meta = collect_env_meta(args.base_url, models[0], args.price_per_hour)
     env_meta["max_model_len"] = _max_model_len_from_vllm(args.base_url)
-    print(f"\n환경 메타: {json.dumps(env_meta, ensure_ascii=False)}")
+    print(f"\n환경 메타(공통): {json.dumps(env_meta, ensure_ascii=False)}")
 
     for model in models:
+        # 모델마다 revision이 다를 수 있어 env_meta를 각자 만들어 붙인다
+        model_meta = {**env_meta, "model_revision": _hf_revision(model)}
         for prompt_path in prompt_paths:
             if not prompt_path.exists():
                 print(f"경고: 프롬프트 파일 없음 — {prompt_path}", file=sys.stderr)
@@ -398,8 +407,9 @@ def main(argv=None):
 
                 r = run_one(entities, sources, judge, gold, args.out_dir,
                             label=label, price_per_hour=args.price_per_hour,
-                            chunk_size=args.chunk_size, top_k=args.top_k)
-                r.env_meta = env_meta
+                            chunk_size=args.chunk_size, top_k=args.top_k,
+                            _total_op_entities=n_op_entities)
+                r.env_meta = model_meta
                 all_results.append(r)
                 ev, lat = r.eval_result, r.latency
                 print(f"  auto_precision={ev.get('auto_precision')} "
