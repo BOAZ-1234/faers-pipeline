@@ -164,17 +164,19 @@ class TimedJudge:
 
 # ── 비용 추정 ─────────────────────────────────────────────────────────────────
 
-def estimate_cost(n_entities: int, rps: float | None, price_per_hour: float,
+def estimate_cost(n_dev: int, rps: float | None, price_per_hour: float,
                   n_op: int = 132_450,
                   retry_factor: float = 1.2) -> dict:
     if not rps:
         return {}
-    gpu_hours = n_entities / rps / 3600
-    cost_usd = gpu_hours * price_per_hour * retry_factor
     return {
+        # 실제 돌린 dev 규모 기준 extrapolation (--limit 여부와 무관하게 비교용)
+        "est_gpu_hours_for_dev": round(n_dev / rps / 3600, 2),
+        "est_cost_usd_for_dev": round(n_dev / rps / 3600 * price_per_hour * retry_factor, 2),
+        # 운영 규모(n_reports≥2 기준, 132,450개) 기준 추정 — 벤치마크의 주 목적
         "est_gpu_hours_for_op": round(n_op / rps / 3600, 2),
         "est_cost_usd_for_op": round(n_op / rps / 3600 * price_per_hour * retry_factor, 2),
-        "cost_per_1k_entities_usd": round(cost_usd / n_entities * 1000, 4) if n_entities else None,
+        "cost_per_1k_entities_usd": round(n_dev / rps / 3600 * price_per_hour * retry_factor / n_dev * 1000, 4) if n_dev else None,
     }
 
 
@@ -207,7 +209,7 @@ def run_one(
     chunk_size: int,
     top_k: int = 10,
     is_baseline: bool = False,
-    _total_op_entities: int = 132_450,
+    n_op: int = 132_450,  # 운영 규모 고정값 (est_*_for_op 계산용)
 ) -> RunResult:
     storage = h.LocalStorage(str(out_dir / label.replace("/", "_")))
     result = RunResult(label=label, model=getattr(judge, "model", "baseline"),
@@ -223,6 +225,7 @@ def run_one(
             chunk_size=chunk_size,
             concurrency=result.concurrency,
         )
+        t_run_end = time.perf_counter()          # evaluate() 시간 제외
         result.eval_result = h.evaluate(storage, gold)
     except Exception as e:
         result.error = str(e)
@@ -230,10 +233,11 @@ def run_one(
     result.elapsed_total_s = round(time.perf_counter() - t0, 1)
 
     if isinstance(judge, TimedJudge):
-        result.latency = judge.latency_stats(result.elapsed_total_s)
+        run_elapsed_s = t_run_end - t0           # LLM 호출 구간만
+        result.latency = judge.latency_stats(run_elapsed_s)
         rps = result.latency.get("rps")
         result.cost_est = estimate_cost(len(entities), rps, price_per_hour,
-                                        n_op=_total_op_entities)
+                                        n_op=n_op)
 
     return result
 
@@ -339,12 +343,9 @@ def main(argv=None):
                 if e.n_reports >= args.min_reports]
     gold, scope = h.load_stage3_gold(args.gold, args.unmatched)
     entities = [e for e in entities if h.gold_for_entity(e, gold)]
-    # --limit 전의 크기 = 운영 시 실제 처리 entity 수 (비용 추정 분모)
-    n_op_entities = len(entities)
     if args.limit:
         entities = entities[:args.limit]
-    print(f"평가 대상 entity: {len(entities):,}개 (leakage 방지 교집합, scope: {scope})"
-          + (f" / 운영 규모 추정용: {n_op_entities:,}개" if args.limit else ""))
+    print(f"평가 대상 entity: {len(entities):,}개 (leakage 방지 교집합, scope: {scope})")
 
     # 후보 소스 (공통)
     sources: list = []
@@ -364,8 +365,7 @@ def main(argv=None):
     print("\n[baseline] LLM 없는 Top-1 실행 중...")
     bl = run_one(entities, sources, Top1Judge(), gold, args.out_dir,
                  label="baseline_top1", price_per_hour=args.price_per_hour,
-                 chunk_size=args.chunk_size, top_k=args.top_k, is_baseline=True,
-                 _total_op_entities=n_op_entities)
+                 chunk_size=args.chunk_size, top_k=args.top_k, is_baseline=True)
     all_results.append(bl)
     print(f"  auto_precision={bl.eval_result.get('auto_precision')} "
           f"cand_recall={bl.eval_result.get('cand_recall')} "
@@ -407,8 +407,7 @@ def main(argv=None):
 
                 r = run_one(entities, sources, judge, gold, args.out_dir,
                             label=label, price_per_hour=args.price_per_hour,
-                            chunk_size=args.chunk_size, top_k=args.top_k,
-                            _total_op_entities=n_op_entities)
+                            chunk_size=args.chunk_size, top_k=args.top_k)
                 r.env_meta = model_meta
                 all_results.append(r)
                 ev, lat = r.eval_result, r.latency

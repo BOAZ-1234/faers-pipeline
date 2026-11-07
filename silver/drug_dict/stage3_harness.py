@@ -665,21 +665,18 @@ def run(entities: list[Entity], sources: list, judge, storage, *, top_k: int = 1
                         s.prefetch([x.normalized for x in todo[i:i + chunk_size]])
             collect(*process_one(e))
     else:
-        # prefetch는 chunk 단위로 메인 스레드에서 미리 돌린다. SentenceTransformer.encode()가
-        # 147,718번 호출되지 않고 739번(chunk_size=200 기준)으로 줄어든다.
-        # ThreadPoolExecutor로 동시 호출. as_completed로 완료 순서대로 집계·저장.
-        # 결과 순서와 무관하게 entity_id가 각 레코드에 들어 있어 finalize 단계에서 멱등.
+        # 전체 todo를 한 번에 prefetch → 배치 임베딩 효율 유지 + chunk 경계 동기화 장벽 제거.
+        # (청크별 prefetch → 청크별 collect는 chunk 끝마다 짧은 워커 공백이 생겼음)
+        # collect 내부의 flush_buf()이 chunk_size마다 part를 저장하므로 재개 안전성은 그대로.
+        for s in sources:
+            if hasattr(s, "prefetch"):
+                s.prefetch([e.normalized for e in todo])
         with ThreadPoolExecutor(max_workers=concurrency) as ex:
             futures: dict = {}
             try:
-                for i in range(0, len(todo), chunk_size):
-                    chunk = todo[i:i + chunk_size]
-                    for s in sources:
-                        if hasattr(s, "prefetch"):
-                            s.prefetch([e.normalized for e in chunk])
-                    futures = {ex.submit(process_one, e): None for e in chunk}
-                    for fut in as_completed(futures):
-                        collect(*fut.result())
+                futures = {ex.submit(process_one, e): None for e in todo}
+                for fut in as_completed(futures):
+                    collect(*fut.result())
             except BaseException as err:
                 log(f"중단 ({type(err).__name__}) — 저장된 part는 보존, 대기 중 요청 취소")
                 for f in futures:
