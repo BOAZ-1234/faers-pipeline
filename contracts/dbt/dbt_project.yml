@@ -10,6 +10,13 @@ test-paths: ['tests']
 target-path: 'target'
 clean-targets: ['target', 'dbt_packages']
 
+# b_stage/fct_case_drug_reaction이 A단계 실제 Iceberg(S3)를 읽을 때 쓸 자격증명.
+# coverage.py의 CREATE SECRET(credential_chain)과 동일 — AWS_PROFILE 환경변수로
+# 지정한 프로필을 그대로 탄다. CREATE OR REPLACE라 dev.duckdb가 영속 파일이라도
+# 재실행 시 "이미 있음" 에러 없이 덮어쓴다.
+on-run-start:
+  - "CREATE OR REPLACE SECRET faers_s3 (TYPE s3, PROVIDER credential_chain, REGION 'ap-northeast-2')"
+
 # 이건 서빙 마트가 아니라 C→B·D 경계의 '조인키 계약 강제'다(기획서 §5-1).
 # C단계 산출(성분 사전)의 조인키를 staging 모델로 받아 table로 물질화해,
 # contract를 실제 CREATE TABLE 시점에 강제한다 → 형식이 어긋난 키는 빌드 실패.
@@ -23,4 +30,6 @@ models:
     staging:
       +materialized: table
     b_stage:
+      +materialized: table
+    gold:
       +materialized: table
