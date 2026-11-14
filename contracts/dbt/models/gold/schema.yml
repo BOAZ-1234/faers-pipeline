@@ -1,0 +1,78 @@
+version: 2
+
+# ── GOLD 신호 점수 계약 ───────────────────────────────────────────────────
+# fct_case_drug_reaction(SILVER-2)을 "가장자리 합 트릭"으로 집계한 최종 산출물.
+# 게이트(IC025>0, a≥3)·필터(시점 라벨)·랭킹은 D단계 몫이라(project-plan.html §4-7)
+# 여기선 걸러내지 않고 계산된 값을 전부 담는다 — D단계가 조인해서 쓸 계약이다.
+
+models:
+  - name: fct_signal_scores
+    description: >
+      성분×부작용 조합 1개당 1행. 2×2표(a,a+b,a+c,N)와 IC025(+ROR·PRR, 참고용)를
+      담는다. 게이트·필터·랭킹은 전혀 적용하지 않음 — D단계가 이 전체를 입력으로
+      받아 적용한다(project-plan.html §4-7).
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: ingredient
+        description: "단일 성분명(소문자). 복합제는 성분 단위로 쪼개서 집계 — ingredient_set 그대로가 아님."
+        data_type: varchar
+        constraints:
+          - type: not_null
+      - name: pt
+        description: "FAERS 반응 원본 표준용어(MedDRA PT)."
+        data_type: varchar
+        constraints:
+          - type: not_null
+      - name: a
+        description: "동시출현 — 이 성분(PS/SS)과 이 반응이 같은 case(최신판)에 같이 나온 고유 caseid 수."
+        data_type: integer
+        constraints:
+          - type: not_null
+      - name: a_plus_b
+        description: "이 성분(PS/SS)이 나온 전체 고유 caseid 수(반응 무관)."
+        data_type: integer
+        constraints:
+          - type: not_null
+      - name: a_plus_c
+        description: "이 반응이 나온 전체 고유 caseid 수(약물 무관, role_cod 필터 없음)."
+        data_type: integer
+        constraints:
+          - type: not_null
+      - name: n
+        description: "전체 고유 caseid 수(caseid별 최신 caseversion만, 전량 집계 — as_of 재현 아님)."
+        data_type: integer
+        constraints:
+          - type: not_null
+      - name: ic
+        description: "Information Component — log2((a+0.5)/(E+0.5)), E=(a+b)(a+c)/N."
+        data_type: double
+        constraints:
+          - type: not_null
+      - name: ic025
+        description: >
+          IC의 95% 신용구간 하한(WHO-UMC 표준 축소 공식). 판정·정렬에 쓰는 유일한
+          점수(project-plan.html §4-5) — 게이트 적용은 D단계 몫이라 여기선 안 거름.
+        data_type: double
+        constraints:
+          - type: not_null
+      - name: ror
+        description: "Reporting Odds Ratio = (a·d)/(b·c). 참고용 — 판정에는 안 씀(IC025와 변형 관계라 중복)."
+        data_type: double
+      - name: prr
+        description: "Proportional Reporting Ratio = (a/(a+b))/(c/(c+d)). 참고용 — 판정에는 안 씀."
+        data_type: double
+      - name: solo_case_count
+        description: >
+          이 성분이 단독(단일성분)으로 쓰인 case 수 — combo_case_count와 비교해서
+          이 신호가 단독 신고에서 온 건지 복합제 신고에서 온 건지 사람이 참고하게
+          남겨둔 보완 정보(상호작용 전용 통계는 v1 이후 작업).
+        data_type: integer
+        constraints:
+          - type: not_null
+      - name: combo_case_count
+        description: "이 성분이 복합제(다성분 ingredient_set)의 일부로 쓰인 case 수."
+        data_type: integer
+        constraints:
+          - type: not_null
