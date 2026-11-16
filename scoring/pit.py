@@ -27,8 +27,12 @@ from scoring.ranking import Gate
 
 
 def quarter_index(year: int, q_start: str) -> int:
-    """정렬 가능한 분기 정수. 2015 July → 20153 (year*10 + 분기)."""
-    return int(year) * 10 + QMAP.get(str(q_start), 1)
+    """**선형** 분기 인덱스 = year*4 + (분기-1). 2015 Q1→8060, Q3→8062.
+
+    선형이라 뺄셈이 곧 '분기 수 차이'(리드타임 단위)가 된다. 연 경계도 안전
+    (2015Q4=8063, 2016Q1=8064, 차=1분기). 정렬도 유지.
+    """
+    return int(year) * 4 + (QMAP.get(str(q_start), 1) - 1)
 
 
 def detected_keys(
@@ -74,6 +78,24 @@ def leadtime(
     rows: list[LeadRow] = []
     for key, action in positives_asof.items():
         first = next((a for a in asofs if key in snapshots[a]), None)
+        before = first is not None and first < action
+        lead = (action - first) if first is not None else None
+        rows.append(LeadRow(key, action, first, before, lead))
+    return rows
+
+
+def leadtime_from_first(
+    positives_asof: dict[SignalKey, int],
+    first_detected: dict[SignalKey, int],
+) -> list[LeadRow]:
+    """스냅샷 대신 '최초 탐지 분기'(build_first_detection.py 결과)로 바로 계산.
+
+    positives_asof : {양성 키 → FDA 조치 분기(선형)}
+    first_detected : {키 → 최초 게이트 통과 분기(선형)}
+    """
+    rows: list[LeadRow] = []
+    for key, action in positives_asof.items():
+        first = first_detected.get(key)
         before = first is not None and first < action
         lead = (action - first) if first is not None else None
         rows.append(LeadRow(key, action, first, before, lead))
