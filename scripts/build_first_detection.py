@@ -63,6 +63,8 @@ def main() -> int:
     ap.add_argument("--mem", default="12GB")
     ap.add_argument("--granularity", choices=["year", "quarter"], default="year",
                     help="cutoff 격자 (year=연 1점, 빠름 / quarter=분기, 느리지만 리드 정밀)")
+    ap.add_argument("--rebuild", action="store_true",
+                    help="기존 fact 무시하고 재빌드 (기본은 있으면 재사용)")
     args = ap.parse_args()
 
     import duckdb
@@ -75,29 +77,38 @@ def main() -> int:
         con.execute(s)
 
     t0 = time.time()
-    # fact (슬림 + 선형 분기 linq). fda_dt=YYYYMMDD → year*4 + (month-1)//3
-    con.execute(f"""
-        CREATE OR REPLACE TABLE fact AS
-        with drug as (select distinct primaryid, caseid, role_cod, drugname, drug_seq
-                      from iceberg_scan('{args.s3}/faers_drug')),
-        reac as (select distinct primaryid, pt from iceberg_scan('{args.s3}/faers_reac')),
-        demo as (select primaryid, caseversion, fda_dt from iceberg_scan('{args.s3}/faers_demo')),
-        em as (select raw_drug_name, entity_id from read_csv_auto('{args.raw_map}', all_varchar=true)),
-        res as (select entity_id, resolved_ingredient_set from read_csv_auto('{args.resolution}', all_varchar=true))
-        select d.caseid, cast(dm.caseversion as integer) as caseversion, d.role_cod,
-               r2.resolved_ingredient_set as ingredient_set, r.pt,
-               cast(substr(dm.fda_dt,1,4) as integer)*4
-                 + (cast(substr(dm.fda_dt,5,2) as integer)-1)/3 as linq
-        from drug d
-        join reac r on d.primaryid=r.primaryid
-        join demo dm on d.primaryid=dm.primaryid
-        left join em m on upper(trim(d.drugname))=m.raw_drug_name
-        left join res r2 on m.entity_id=r2.entity_id
-        where length(dm.fda_dt) >= 6
-    """)
-    print(f"fact rows: {con.execute('select count(*) from fact').fetchone()[0]:,} ({time.time()-t0:.0f}s)", flush=True)
+    # 이미 만든 fact 가 있으면 재사용(4분 재빌드 생략). --rebuild 로 강제 재생성.
+    has_fact = con.execute(
+        "select count(*) from information_schema.tables where table_name='fact'"
+    ).fetchone()[0]
+    n_fact = con.execute("select count(*) from fact").fetchone()[0] if has_fact else 0
+    if n_fact > 0 and not args.rebuild:
+        print(f"fact 재사용: {n_fact:,}행 (재빌드 생략)", flush=True)
+    else:
+        # fact (슬림 + 선형 분기 linq). fda_dt=YYYYMMDD → year*4 + (month-1)//3 (정수나눗셈)
+        con.execute(f"""
+            CREATE OR REPLACE TABLE fact AS
+            with drug as (select distinct primaryid, caseid, role_cod, drugname, drug_seq
+                          from iceberg_scan('{args.s3}/faers_drug')),
+            reac as (select distinct primaryid, pt from iceberg_scan('{args.s3}/faers_reac')),
+            demo as (select primaryid, caseversion, fda_dt from iceberg_scan('{args.s3}/faers_demo')),
+            em as (select raw_drug_name, entity_id from read_csv_auto('{args.raw_map}', all_varchar=true)),
+            res as (select entity_id, resolved_ingredient_set from read_csv_auto('{args.resolution}', all_varchar=true))
+            select d.caseid, cast(dm.caseversion as integer) as caseversion, d.role_cod,
+                   r2.resolved_ingredient_set as ingredient_set, r.pt,
+                   cast(cast(substr(dm.fda_dt,1,4) as integer)*4
+                     + (cast(substr(dm.fda_dt,5,2) as integer)-1)//3 as integer) as linq
+            from drug d
+            join reac r on d.primaryid=r.primaryid
+            join demo dm on d.primaryid=dm.primaryid
+            left join em m on upper(trim(d.drugname))=m.raw_drug_name
+            left join res r2 on m.entity_id=r2.entity_id
+            where length(dm.fda_dt) >= 6
+        """)
+        print(f"fact rows: {con.execute('select count(*) from fact').fetchone()[0]:,} ({time.time()-t0:.0f}s)", flush=True)
 
-    lo, hi = con.execute("select min(linq), max(linq) from fact").fetchone()
+    lo, hi = con.execute("select cast(min(linq) as integer), cast(max(linq) as integer) from fact").fetchone()
+    lo, hi = int(lo), int(hi)
     if args.granularity == "year":
         grid = [y * 4 + 3 for y in range(lo // 4, hi // 4 + 1)]  # 각 연도 Q4
     else:
