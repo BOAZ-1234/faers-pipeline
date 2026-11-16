@@ -22,6 +22,12 @@ stdlib만으로는 안 됨(다른 drug_dict 스크립트는 전부 stdlib만 씀
 
 --out-miss-csv는 사전+prod_ai(1·1.5단계)로도 못 잡은 이름만 신고건수 내림차순으로 저장한다
 (장수연 2단계 입력용).
+
+--out-matched-csv는 반대로 사전+prod_ai로 잡힌 이름의 실제 매칭 근거(ingredient_set·unii·
+출처)를 저장한다(B단계 stg_resolution 연결용, build_resolution.py 입력) — 이 파일이
+"매치됐다/안 됐다"만 보던 lookup()/lookup_with_prod_ai()와 달리 유일하게 prod_ai 폴백값을
+들고 있는 지점이라(prod_ai는 이 스크립트의 Iceberg 스캔에서만 뽑히고 어디에도 저장 안 됨),
+여기서 같이 안 뽑으면 나중에 재현할 방법이 없다.
 """
 import argparse
 import csv
@@ -29,7 +35,7 @@ from pathlib import Path
 
 import duckdb
 
-from match import load_dictionary, lookup, lookup_with_prod_ai
+from match import load_dictionary, load_dictionary_index, lookup, lookup_with_prod_ai, lookup_full
 
 BUCKET = "boaz-1234-825494477740-ap-northeast-2-an"
 FAERS_DRUG_TABLE = f"s3://{BUCKET}/iceberg_warehouse/stage_a_raw/faers_drug"
@@ -87,10 +93,29 @@ def write_miss_csv(path: Path, miss: list[tuple[str, int]]) -> None:
             writer.writerow([name, n])
 
 
+MATCHED_FIELDS = ["name", "n_reports", "via", "candidate_rank", "ingredient_set", "unii", "source"]
+
+
+def write_matched_csv(path: Path, matched: list[tuple[str, int, dict]]) -> None:
+    """사전+prod_ai로 잡힌 이름의 실제 매칭 근거 저장 — 이름당 후보가 여러 개면
+    (사전 충돌, match.lookup_full 참고) 여러 행으로 쪼개서 candidate_rank로 구분한다."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=MATCHED_FIELDS)
+        w.writeheader()
+        for name, n, hit in matched:
+            for rank, cand in enumerate(hit["candidates"], start=1):
+                w.writerow({
+                    "name": name, "n_reports": n, "via": hit["via"], "candidate_rank": rank,
+                    "ingredient_set": cand["ingredient_set"], "unii": cand["unii"], "source": cand["source"],
+                })
+
+
 def main():
     ap = argparse.ArgumentParser(description="C세부1 커버리지 측정")
     ap.add_argument("--out-freq-csv", type=Path, help="고유명 빈도 CSV 저장 경로 (golden/diana_golden.py --freq-csv용)")
     ap.add_argument("--out-miss-csv", type=Path, help="1·1.5단계 미매칭 고유명 CSV 저장 경로 (2단계 입력용)")
+    ap.add_argument("--out-matched-csv", type=Path, help="1·1.5단계 매칭 근거 CSV 저장 경로 (B단계 stg_resolution 연결용)")
     args = ap.parse_args()
 
     print("FAERS drugname 집계 중 (S3 Iceberg 전체 스캔 — 수 분 걸림)...", flush=True)
@@ -103,10 +128,12 @@ def main():
 
     products, ingredients, known_combos = load_dictionary()
     print(f"사전: 브랜드 {len(products):,}개, 성분 {len(ingredients):,}개", flush=True)
+    index = load_dictionary_index() if args.out_matched_csv else None
 
     hit_unique = hit_reports = total_reports = 0
     hit_unique_dict_only = hit_reports_dict_only = 0
     miss = []
+    matched = []
     for name, n, pai in rows:
         total_reports += n
         dict_hit = lookup(name, products, ingredients, known_combos)
@@ -116,6 +143,14 @@ def main():
         if lookup_with_prod_ai(name, pai, products, ingredients, known_combos):
             hit_unique += 1
             hit_reports += n
+            if index is not None:
+                hit = lookup_full(name, index, known_combos, prod_ai=pai)
+                if hit is None:
+                    # lookup_with_prod_ai()는 True인데 lookup_full()이 못 찾으면 두 경로가
+                    # 갈라진 것 — 조용히 넘기지 않고 바로 알려준다(둘은 같은 판정 로직을
+                    # 그대로 따라가야 함, match.py 참고).
+                    raise AssertionError(f"lookup_with_prod_ai True인데 lookup_full None: {name!r}")
+                matched.append((name, n, hit))
         else:
             miss.append((name, n))
 
@@ -130,6 +165,10 @@ def main():
     if args.out_miss_csv:
         write_miss_csv(args.out_miss_csv, miss)
         print(f"미매칭 CSV 저장 → {args.out_miss_csv} ({len(miss):,}개)", flush=True)
+
+    if args.out_matched_csv:
+        write_matched_csv(args.out_matched_csv, matched)
+        print(f"매칭 근거 CSV 저장 → {args.out_matched_csv} ({len(matched):,}개 이름)", flush=True)
 
     print("\n못 잡은 것 중 신고 건수 많은 상위 15개:")
     for name, n in miss[:15]:
