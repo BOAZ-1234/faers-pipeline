@@ -18,6 +18,8 @@ from scoring.scorer import score, Scorecard
 from scoring import metrics, ground_truth, random_ranking
 from scoring.ground_truth import load_gold
 from scoring.ranking import VERSIONS, Gate, build_ranking, FeatureUnavailable
+from scoring.labelmap import build_eval_labelset, vocab_from_signals
+from scoring import pit
 
 __all__ = [
     "SignalKey", "make_key", "canonical",
@@ -26,6 +28,8 @@ __all__ = [
     "load_gold",
     # 순위표 버전 사다리 (v1~v5)
     "VERSIONS", "Gate", "build_ranking", "FeatureUnavailable",
+    # 실사전 매핑(커버리지) + v2 시점 리드타임
+    "build_eval_labelset", "vocab_from_signals", "pit",
 ]
 
 # 기본 K값 — 계획서 4-2 (검토대상 축소 관점)

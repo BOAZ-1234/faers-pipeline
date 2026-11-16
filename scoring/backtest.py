@@ -33,6 +33,9 @@ import pandas as pd
 
 from scoring import score
 from scoring.ground_truth import build_labelset, load_gold
+from scoring.labelmap import (
+    build_eval_labelset, load_drug_map, load_reaction_map, vocab_from_signals,
+)
 from scoring.mappers import load_ingredient_mapper, load_reaction_mapper
 from scoring.ranking import VERSIONS, Gate, build_ranking
 
@@ -61,11 +64,21 @@ def run(args: argparse.Namespace) -> int:
     print(f"signals 로드: {len(signals):,}행  ({args.signals})")
 
     gold = load_gold(args.gold) if args.gold else load_gold()
-    ls = build_labelset(
-        gold,
-        ingredient_of=load_ingredient_mapper(args.drug_map),
-        reaction_of=load_reaction_mapper(args.reaction_dict),
-    )
+    if args.drug_map or args.reaction_dict:
+        # vocab 인식 + 다중PT 확장 (실사전 주입 시). 순위표에서 vocab 추출.
+        ing_vocab, pt_vocab = vocab_from_signals(signals)
+        ls = build_eval_labelset(
+            gold, ing_vocab=ing_vocab, pt_vocab=pt_vocab,
+            drug_map=load_drug_map(args.drug_map) if args.drug_map else None,
+            reaction_map=load_reaction_map(args.reaction_dict) if args.reaction_dict else None,
+        )
+    else:
+        # 사전 없으면 얇은 항등 매퍼 (커버리지 낮음 — coverage 로 확인)
+        ls = build_labelset(
+            gold,
+            ingredient_of=load_ingredient_mapper(args.drug_map),
+            reaction_of=load_reaction_mapper(args.reaction_dict),
+        )
     print("라벨셋:", ls.summary())
 
     gate = Gate.standard() if args.gate else None

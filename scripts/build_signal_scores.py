@@ -39,6 +39,9 @@ def main() -> int:
     ap.add_argument("--tmp", default=f"{HOME}/duckdb_tmp")
     ap.add_argument("--mem", default="12GB", help="duckdb memory_limit")
     ap.add_argument("--threads", type=int, default=0, help="0=기본")
+    ap.add_argument("--as-of", default=None,
+                    help="시점(PIT) 집계: fda_dt < YYYYMMDD 인 신고만 집계 (v2). "
+                         "없으면 전 기간. 출력파일명에 _asof<날짜> 붙음")
     args = ap.parse_args()
 
     import duckdb  # 없으면 여기서 ImportError → pip install duckdb
@@ -68,6 +71,13 @@ def main() -> int:
 
     t0 = time.time()
 
+    # v2 시점(PIT) 필터: fda_dt < as_of 인 신고만 (조치 이전 데이터로만 집계)
+    asof_where = f"\n        where dm.fda_dt < '{args.as_of}'" if args.as_of else ""
+    out = args.out
+    if args.as_of:
+        base, ext = os.path.splitext(args.out)
+        out = f"{base}_asof{args.as_of}{ext}"
+
     # ── fct_case_drug_reaction (SILVER-2 펼치기) — 필요한 컬럼만 슬림하게 ──
     # gold가 쓰는 건 caseid, caseversion, role_cod, ingredient_set, pt 뿐이라 그것만.
     con.execute(f"""
@@ -77,7 +87,7 @@ def main() -> int:
             from iceberg_scan('{args.s3}/faers_drug')
         ),
         reac as (select distinct primaryid, pt from iceberg_scan('{args.s3}/faers_reac')),
-        demo as (select primaryid, caseversion from iceberg_scan('{args.s3}/faers_demo')),
+        demo as (select primaryid, caseversion, fda_dt from iceberg_scan('{args.s3}/faers_demo')),
         em as (select raw_drug_name, entity_id
                from read_csv_auto('{args.raw_map}', all_varchar=true)),
         res as (select entity_id, resolved_ingredient_set
@@ -92,7 +102,7 @@ def main() -> int:
         join reac r  on d.primaryid = r.primaryid
         join demo dm on d.primaryid = dm.primaryid
         left join em  m  on upper(trim(d.drugname)) = m.raw_drug_name
-        left join res r2 on m.entity_id = r2.entity_id
+        left join res r2 on m.entity_id = r2.entity_id{asof_where}
     """)
     print(f"fact rows: {con.execute('select count(*) from fact').fetchone()[0]:,} "
           f"({time.time()-t0:.0f}s)", flush=True)
@@ -134,9 +144,10 @@ def main() -> int:
           f"({time.time()-t0:.0f}s)", flush=True)
 
     con.execute(
-        f"COPY (SELECT ingredient, pt, a, ic025 FROM fss) TO '{args.out}' (HEADER)"
+        f"COPY (SELECT ingredient, pt, a, ic025 FROM fss) TO '{out}' (HEADER)"
     )
-    print(f"exported -> {args.out}", flush=True)
+    print(f"exported -> {out}" + (f"  (as_of {args.as_of})" if args.as_of else ""),
+          flush=True)
     return 0
 
 
