@@ -27,8 +27,14 @@ S3_DEFAULT = ("s3://boaz-1234-825494477740-ap-northeast-2-an/"
 PRODRUN = f"{HOME}/함하경/faers-pipeline/out/prod_run3/final"
 
 
-def _agg_sql(cutoff: int) -> str:
-    """linq <= cutoff 인 신고만으로 게이트(IC025>0 & a>=3) 통과한 (ingredient,pt)."""
+def _agg_sql(cutoff: int, filtered: bool = False) -> str:
+    """linq <= cutoff 인 신고만으로 게이트(IC025>0 & a>=3) 통과한 (ingredient,pt).
+
+    filtered=True 면 gold_ing/gold_pt 에 있는 성분·반응만 집계 → 메모리 1/1000(OOM 방지).
+    a+b(성분총)·a+c(반응총)·N 은 그래도 전체 case 기준이라 IC025 정확(성분/반응만 제한).
+    """
+    ingf = "and trim(ing) in (select ingredient from gold_ing)" if filtered else ""
+    ptf = "and pt in (select pt from gold_pt)" if filtered else ""
     return f"""
     with lr0 as (select * from fact where linq <= {cutoff}),
     lv as (select caseid, max(caseversion) as caseversion from lr0 group by caseid),
@@ -36,8 +42,8 @@ def _agg_sql(cutoff: int) -> str:
            join lv on f.caseid=lv.caseid and f.caseversion=lv.caseversion),
     cd as (select distinct caseid, trim(ing) as ingredient
            from lr, unnest(string_split(ingredient_set,'|')) as t(ing)
-           where role_cod in ('PS','SS') and ingredient_set is not null and ingredient_set<>''),
-    cr as (select distinct caseid, pt from lr where pt is not null and pt<>''),
+           where role_cod in ('PS','SS') and ingredient_set is not null and ingredient_set<>'' {ingf}),
+    cr as (select distinct caseid, pt from lr where pt is not null and pt<>'' {ptf}),
     nt as (select count(distinct caseid) as n from lr),
     dt as (select ingredient, count(distinct caseid) as ab from cd group by ingredient),
     rt as (select pt, count(distinct caseid) as ac from cr group by pt),
@@ -65,6 +71,9 @@ def main() -> int:
                     help="cutoff 격자 (year=연 1점, 빠름 / quarter=분기, 느리지만 리드 정밀)")
     ap.add_argument("--rebuild", action="store_true",
                     help="기존 fact 무시하고 재빌드 (기본은 있으면 재사용)")
+    ap.add_argument("--gold-ings", default=None,
+                    help="gold 성분 목록(개행구분, 로컬/s3). 주면 그 성분만 집계 → OOM 방지")
+    ap.add_argument("--gold-pts", default=None, help="gold 반응 목록(개행구분, 로컬/s3)")
     args = ap.parse_args()
 
     import duckdb
@@ -115,9 +124,20 @@ def main() -> int:
         grid = list(range(int(lo), int(hi) + 1))
     print(f"cutoff 격자 {len(grid)}개: {grid[0]}..{grid[-1]} ({args.granularity})", flush=True)
 
+    # gold 필터 테이블 (주면 그 성분·반응만 집계 → OOM 방지)
+    filtered = bool(args.gold_ings and args.gold_pts)
+    if filtered:
+        con.execute("CREATE OR REPLACE TABLE gold_ing AS "
+                    f"select column0 as ingredient from read_csv_auto('{args.gold_ings}', header=false)")
+        con.execute("CREATE OR REPLACE TABLE gold_pt AS "
+                    f"select column0 as pt from read_csv_auto('{args.gold_pts}', header=false)")
+        ni = con.execute("select count(*) from gold_ing").fetchone()[0]
+        np_ = con.execute("select count(*) from gold_pt").fetchone()[0]
+        print(f"gold 필터 적용: 성분 {ni} / 반응 {np_}", flush=True)
+
     con.execute("CREATE OR REPLACE TABLE det(ingredient varchar, pt varchar, cutoff integer)")
     for i, c in enumerate(grid, 1):
-        con.execute(f"INSERT INTO det SELECT ingredient, pt, {c} FROM ({_agg_sql(c)})")
+        con.execute(f"INSERT INTO det SELECT ingredient, pt, {c} FROM ({_agg_sql(c, filtered)})")
         print(f"  [{i}/{len(grid)}] cutoff {c} 완료 ({time.time()-t0:.0f}s)", flush=True)
 
     con.execute("""CREATE OR REPLACE TABLE first_detection AS
