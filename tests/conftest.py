@@ -3,7 +3,6 @@ import pathlib
 import sys
 
 import pytest
-from pyspark.sql import SparkSession
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -28,6 +27,8 @@ def local_iceberg_spark(tmp_path_factory):
     S3를 전혀 건드리지 않는 로컬 파일시스템 기반 Iceberg 카탈로그.
     bronze/CLAUDE.md 규칙(조회 비용 절감)에 맞춰 테스트는 실제 S3 버킷에 접근하지 않는다.
     """
+    from pyspark.sql import SparkSession  # spark 테스트에서만 필요 → 지연 import
+
     warehouse_dir = tmp_path_factory.mktemp("iceberg_warehouse")
     warehouse_uri = warehouse_dir.as_posix()
 
