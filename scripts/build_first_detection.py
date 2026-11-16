@@ -135,8 +135,14 @@ def main() -> int:
         np_ = con.execute("select count(*) from gold_pt").fetchone()[0]
         print(f"gold 필터 적용: 성분 {ni} / 반응 {np_}", flush=True)
 
-    con.execute("CREATE OR REPLACE TABLE det(ingredient varchar, pt varchar, cutoff integer)")
+    # resume: det 가 이미 있으면 유지하고, 이미 끝난 cutoff 는 건너뛴다(중단 복구).
+    con.execute("CREATE TABLE IF NOT EXISTS det(ingredient varchar, pt varchar, cutoff integer)")
+    done = {r[0] for r in con.execute("select distinct cutoff from det").fetchall()}
+    if done:
+        print(f"resume: 이미 완료된 cutoff {len(done)}개 건너뜀", flush=True)
     for i, c in enumerate(grid, 1):
+        if c in done:
+            continue
         con.execute(f"INSERT INTO det SELECT ingredient, pt, {c} FROM ({_agg_sql(c, filtered)})")
         print(f"  [{i}/{len(grid)}] cutoff {c} 완료 ({time.time()-t0:.0f}s)", flush=True)
 
