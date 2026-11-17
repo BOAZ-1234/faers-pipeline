@@ -1,50 +1,54 @@
-# D단계 백테스트 하네스 — v2~v5 인수인계 가이드
+# D단계 백테스트 — 결과 · 결정 · v2~v5 인수인계
 
-정답지(gold)로 신호 순위표(`fct_signal_scores`)를 채점하는 하네스. **v1(IC025 단독) 완료.**
-이 문서로 v2~v5를 각자 맡아 (1) 데이터 정제 (2) 하네스 채점한다.
+정답지(gold)로 신호 순위표(`fct_signal_scores`)를 채점하는 하네스. **v1(IC025) 완료.**
+아래 **결과를 보고 v1에서 멈출지, v2~v5를 더 할지 먼저 결정**한다. 더 하기로 하면 §3~ 가이드대로.
 
 ---
 
-## 1. 개요 — 버전 사다리 · 역할
+## 0. 결과 & 결정 (먼저 읽기)
 
-피처를 하나씩 얹으며 순위가 오르는지 본다("한꺼번에 안 만든다").
+**v1 성능** (정답지 양성 283개, 랭킹 후보 833,215쌍. 상세 `docs/v1-backtest-results.md`)
 
-| 버전 | 추가 피처 | 필요 데이터 | 담당 |
-|---|---|---|---|
-| v1 | `ic025` | (완료) | ✅ |
-| v2 | 시점(PIT) 리드타임 | as_of 분기 스냅샷(이수연) + OpenFDA 조치일(이지훈) | **이수연·이지훈** |
-| v3 | `+death_frac` | FAERS OUTC `outc_cod` | **이지훈** |
-| v4 | `+dechal_frac, rechal_frac` | FAERS DRUG `dechal`,`rechal` | **이지훈** |
-| v5 | `+recency` | FAERS DEMO `fda_dt` | **이지훈** |
+| | 희소·심각 신호 | 흔한 신호 |
+|---|---|---|
+| 예시 | canagliflozin × 당뇨성 케토산증 | montelukast × 우울증 |
+| 등수(ic025) | 상위 **0.67%** | 상위 18.7% |
+| 등수(ic025×log(a)) | 상위 **0.09%** (#766) | 상위 4.7% |
 
-**역할**
-- **장수연** — 채점기/평가 하네스(`scoring/`) 소유. 백테스트 운영, 랭킹 실험(예: `ic025×log(a)`),
-  결과 해석·발표 스토리, 팀원 산출물 통합·검수.
-- **이수연** — `fct_signal_scores`(dbt GOLD) 소유. v2 as_of 스냅샷, v3~5 피처 컬럼 통합·export.
-- **이지훈** — v3/4/5 피처 집계(OUTC/DRUG/DEMO) + **OpenFDA 조치일 추출** + 정답지 성분 정규화(§5).
-- **함하경** — 부작용 사전(`reaction_dict`) 확장(§5 워크리스트 검토).
+- **희소하고 심각한 약물 부작용은 매우 잘 잡힘**(상위 0.1~0.7%). **흔한 부작용은 중간대로 묽음**
+  (IC025 구조적 한계 — 흔한 반응은 기대값이 커서 불균형이 "겨우" 잡힘).
+- 전체 양성 등수 중앙값: ic025 38.8% → **ic025×log(a) 28.3%** (랭킹만 바꿔도 개선, 새 데이터 無).
+- 선행연구 vigiRank(피처로 precision ≈2.6배)와는 지표·데이터가 달라 직접비교 불가(느슨한 참고).
+
+**결정 포인트**
+
+| 선택 | 내용 | 비용 |
+|---|---|---|
+| **A. v1에서 멈춤** | 희소·심각 신호는 이미 top. `ic025×log(a)` 적용하면 흔한신호도 일부 개선. 간단·완성. | 랭킹 코드 1줄 |
+| **B. v2~v5 추가** | **v2 = 리드타임**("FDA보다 N분기 먼저 탐지" 와우포인트) + **v3~5 = 흔한신호 끌어올림**(중대성·끊음/재투여·최근성). | 아래 데이터 정제 |
+
+> 추천: **v2(리드타임)는 발표 임팩트가 커서 할 가치 있음.** v3~5는 흔한신호 개선 여지를 보는 실험.
+> v1만으로도 "희소·심각 신호 조기포착"은 이미 성립.
+
+---
+
+## 1. 역할
+
+| 담당 | 할 일 |
+|---|---|
+| **장수연** | 채점기/평가 하네스(`scoring/`) 소유. 백테스트 운영, 랭킹 실험(`ic025×log(a)`), 결과 해석·발표, 통합·검수 |
+| **이수연** | `fct_signal_scores`(dbt GOLD) 소유. v2 as_of 스냅샷, v3~5 피처 컬럼 통합·export |
+| **이지훈** | v3/4/5 피처 집계(FAERS OUTC/DRUG/DEMO) + 정답지 성분 정규화(§6) |
+| **함하경** | 부작용 사전(`reaction_dict`) 확장(§5) |
 
 - v1~v2는 `ic025`로 정렬, **v3~v5는 shrinkage 로지스틱 회귀(numpy)로 가중치 학습** —
-  `signals`에 피처 컬럼만 있으면 `build_ranking`이 자동 사용. 피처는 **누적**(v5는 v3·v4 피처 전부 필요).
+  `signals`에 피처 컬럼만 있으면 `build_ranking`이 자동 사용. 피처는 **누적**.
 
 ---
 
-## 2. 조인 키 계약 (노트 ③) — 꼭 읽기
-
-채점기는 **정규화를 하지 않는다.** `canonical()`(소문자·공백·NFKC)만 걸어 완전일치로 조인.
-성분/반응 정규화는 **상류(사전)**에서 끝나야 한다.
-
-> ⚠️ **정답지는 아직 미정규화.** gold `product`/`signal`은 FDA 공지 자유텍스트(브랜드·염·클래스)라
-> FAERS 성분 정규화 파이프라인을 안 거쳤다. 현재 `scoring/labelmap.py`가 염/철자/괄호를 regex로
-> 임시 보정(브릿지). **정식 해법 = 정답지 `product`를 FAERS 성분 정규화기에 태워
-> `gold_ingredient_norm` 생성 → 채점기는 canonical만**(§5).
-
----
-
-## 3. 하네스 실행 (공통)
+## 2. 하네스 실행 (공통)
 
 ```bash
-# 레포 루트, PYTHONPATH=. (scoring 패키지 import)
 PYTHONPATH=. python -m scoring.backtest \
     --signals <fct_signal_scores.parquet> \
     --drug-map <drug_ingredient_map.csv> \
@@ -54,96 +58,115 @@ PYTHONPATH=. python -m scoring.backtest \
 
 | 플래그 | 의미 |
 |---|---|
-| `--version` | 채점 버전(반복 가능: `--version v1 --version v3`) |
-| `--gate` | 표준 게이트 a≥3 & IC025>0 |
+| `--version` | 채점 버전(반복 가능). `--gate` 표준 게이트 a≥3 & IC025>0 |
 | `--include-classes` | 클래스 수준 정답지(NSAIDs 등)도 포함(기본=제외, 성분단위 범위 밖) |
-| `--ks "1000,5000,..."` | 평가 K |
-| `--out result.json` | JSON 저장 |
+| `--ks "1000,5000,..."` / `--out r.json` | 평가 K / JSON 저장 |
 
-**출력 읽는 법:** `커버리지`(정답지를 순위표 키로 올린 비율=Recall 상한, **0이면 사전 미주입**) →
-`Recall@K`(상위 K에서 양성 비율) → `Lift@K`(무작위 대비 배수). 결과 해석은 `docs/v1-backtest-results.md`.
+출력: `커버리지`(정답지를 순위표 키로 올린 비율=Recall 상한, **0이면 사전 미주입**) → `Recall@K` / `Lift@K`.
+
+**조인 키 계약(노트 ③):** 채점기는 정규화 안 함, `canonical()`(소문자·공백·NFKC)만 걸어 완전일치.
+정규화는 상류(사전)에서 끝나야 함. ⚠️ 정답지 `product`/`signal`은 아직 FDA 자유텍스트(미정규화) →
+현재 `scoring/labelmap.py`가 염/철자/괄호를 regex로 임시 보정(브릿지). 정식 해법 = §6.
 
 ---
 
-## 4. v2 — 시점(PIT) 리드타임 (처음부터)
+## 3. v3 / v4 / v5 — 피처 컬럼 정제 (이지훈, 병렬 가능)
 
-**목표:** "FDA 조치보다 몇 분기 먼저 신호가 떴나" = **리드타임 = 조치분기 − 최초탐지분기** (컨퍼런스 와우포인트).
-전기간 합산본으론 불가 — 시점별로 뽑아야 한다.
+**소스 = FAERS 원본** (S3 iceberg `stage_a_raw/faers_*`, 이미 적재됨 — finish_pit이 읽는 그 소스).
+**산출물 = `fct_signal_scores`에 (성분,반응)쌍별 피처 컬럼 추가** → `--version v3` 등 바로 작동.
+없으면 `FeatureUnavailable`로 알림. 요구 컬럼 = `scoring/ranking.py`의 `VERSIONS[vN].features`.
 
-### 필요 데이터 2종
-- **(A) as_of 분기 스냅샷** = 우리가 *언제* 탐지했나. **(이수연)**
-- **(B) OpenFDA 조치일** = FDA가 *언제* 조치했나. **(이지훈)**
+| 피처 | FAERS 소스 테이블 | 필드 | 정의 (쌍별) |
+|---|---|---|---|
+| `death_frac` (v3) | `faers_outc` | `outc_cod` | 공출현 case 중 `outc_cod='DE'`(사망) 비율 (선택: serious=DE/LT/HO/DS/CA/RI) |
+| `dechal_frac` (v4) | `faers_drug` | `dechal` | 성분 suspect(PS/SS) case 중 `dechal='Y'` 비율 |
+| `rechal_frac` (v4) | `faers_drug` | `rechal` | 위와 동일, `rechal='Y'` |
+| `recency` (v5) | `faers_demo` | `fda_dt` | 최근 2년 내 보고 비율(0~1) 또는 보고분기 가중합 |
 
-### 뽑는 법 — 단계별
+> ⚠️ `faers_outc` 테이블명은 iceberg 적재 여부 확인 필요(없으면 FAERS OUTC 분기파일 적재 선행).
 
-**A. as_of 스냅샷 → 최초 탐지 분기**
-1. 분기 격자 정의(예: 2013Q1 ~ 최신). 분기 인덱스는 선형 `year*4+(분기-1)` (= `scoring/pit.quarter_index`, 뺄셈이 곧 분기 수).
-2. 각 분기 `c`마다 **`fct_signal_scores`를 `fda_dt < c` 조건으로 집계** → 그 시점 신호표.
-   - ⚠️ **메인 `fct_signal_scores`와 *완전히 동일한 집계 로직*(role·resolution·caseversion)**이어야 함.
-     → 이수연이 **dbt 모델에 날짜 컷오프 파라미터만 추가**해 재사용하는 게 가장 안전(별도 raw 재집계 금지:
-     카운트 정의가 틀어지면 리드타임 전부 깨짐).
-3. 각 분기 스냅샷에서 **게이트(a≥3 & IC025>0) 통과한 (성분,반응)** = 그 시점 탐지집합.
-4. 각 (성분,반응)의 **최초 탐지 분기 `first_q`** = 게이트를 **처음** 통과한 분기 `c`.
-   → `first_detection.csv` (`ingredient, pt, first_q`) 로 export.
+---
 
-**B. 조치 분기**
-5. **OpenFDA drug label API / Drugs@FDA**에서 각 양성 신호의 **라벨 변경·안전성 공지 날짜**를 분기 단위로 추출
-   → gold에 `action_q` 컬럼으로 붙임. (지금 `leadtime_report.py`는 gold `first_year`(연)만 써서 거침 — 분기로 정밀화)
+## 4. v2 — 시점(PIT) 리드타임
 
-**C. 리드타임 계산 (로컬)**
+**목표:** 리드타임 = **조치 분기 − 최초 탐지 분기** ("FDA보다 N분기 먼저 신호가 떴나").
+
+**필요 데이터**
+- **(A) as_of 분기 스냅샷 (이수연)** = 우리가 *언제* 탐지했나:
+  `fct_signal_scores`를 **`fda_dt < 기준분기`로 잘라 분기별 집계** → 각 분기의 게이트(a≥3&IC025>0)
+  통과쌍. ⚠️ **메인 fct와 *완전히 동일한 집계 로직*(role·resolution·caseversion).** dbt에 날짜
+  컷오프 파라미터만 추가해 재사용이 가장 안전(별도 raw 재집계 금지 — 카운트 틀어지면 전부 깨짐).
+  → 각 쌍의 **최초 게이트 통과 분기 `first_q`** 추출 → `first_detection.csv`.
+- **(B) 조치 분기** = FDA가 *언제* 조치했나:
+  **이미 정답지에 있음.** `labelset/data/labelset_gold.csv`의 `year`·`q_start`·`quarter_label`이
+  FDA가 그 신호를 **FAERS 분기 신호 보고에 올린 분기** = 조치 분기. → 따로 안 받아와도 됨.
+  - (선택) 더 엄격히 "실제 라벨 변경일"로 보려면 **openFDA Drug Labeling API**
+    (`open.fda.gov/apis/drug/label`, `effective_time` 필드)로 라벨변경 분기 추출. drugsfda(승인정보)는 아님.
+
+**실행 (로컬):**
 ```bash
 PYTHONPATH=. python scripts/leadtime_report.py \
-    --first-detection first_detection.csv \
-    --signals fct_signal_scores.parquet \
-    --drug-map drug_ingredient_map.csv \
-    --reaction-dict reaction_dict_final.csv \
+    --first-detection first_detection.csv --signals fct_signal_scores.parquet \
+    --drug-map drug_ingredient_map.csv --reaction-dict reaction_dict_final.csv \
     --out leadtime_rows.csv
 ```
-→ 출력: **조치 이전 탐지율** + **리드타임(분기) 중앙값**. per-key 표는 `leadtime_rows.csv`.
-
-> 평가 로직(`scoring/pit.py`)·리포트(`leadtime_report.py`)는 완성돼 있음. **남은 건 위 (A)(B) 데이터 생성뿐.**
+→ 출력: 조치 이전 탐지율 + 리드타임(분기) 중앙값. 평가 로직(`scoring/pit.py`)·리포트는 완성됨.
+**남은 건 (A) 스냅샷 생성뿐**(조치일은 정답지에 있음).
 
 ---
 
-## 5. v3 / v4 / v5 — 피처 컬럼 정제 (이지훈, 병렬 가능)
+## 5. 함하경 — 부작용 사전(`reaction_dict`) 확장
 
-**산출물 = `fct_signal_scores`에 (성분,반응)쌍별 피처 컬럼 추가.** 컬럼만 생기면 `--version v3` 등 바로 작동.
-없으면 `FeatureUnavailable`로 알림(가짜로 안 채움). 요구 컬럼 = `scoring/ranking.py`의 `VERSIONS[vN].features`.
+### 왜 필요한가
+정답지 매칭 실패는 **거의 다 반응(signal)쪽**(성분은 95% 맞음). 정답지 `signal`이 FDA 자유텍스트라
+우리 신호표 PT(MedDRA 정식명)와 표기가 달라서다. 이 사전이 **gold signal → PT** 를 번역하는데,
+지금 **118행뿐**이라 못 덮는 게 많다. 행을 추가하면 커버리지가 오른다.
 
-| 피처 | 소스 | 정의 (쌍별) |
+### 뭘 하면 되나
+**`reaction_dict_final.csv`(함하경이 준 파일)에 행을 직접 추가.** 형식:
+```
+signal, pt_set_id
+```
+- `signal` = 정답지(`labelset/data/labelset_gold.csv`, label=양성 행)의 `signal` 값 **그대로**.
+- `pt_set_id` = 그 signal에 해당하는 **우리 신호표 PT** (여러 개면 `|`로 구분).
+  PT 정식명은 신호표 `fct_signal_scores`의 `pt` 컬럼(= MedDRA PT)에서 골라야 매칭됨.
+
+### 어떤 게 안 맞고 있나 — 실제 예시 (정답지 signal → 넣을 PT)
+| 유형 | 정답지 signal (지금 실패) | 추가할 행 (예) |
 |---|---|---|
-| `death_frac` (v3) | FAERS OUTC `outc_cod` | 공출현 case 중 `outc_cod='DE'`(사망) 비율 (선택: serious=DE/LT/HO/DS/CA/RI) |
-| `dechal_frac` (v4) | FAERS DRUG `dechal` | 성분이 suspect(PS/SS)인 case 중 `dechal='Y'` 비율 |
-| `rechal_frac` (v4) | FAERS DRUG `rechal` | 위와 동일, `rechal='Y'` |
-| `recency` (v5) | FAERS DEMO `fda_dt` | 최근 2년 내 보고 비율(0~1) 또는 보고분기 가중합 |
+| 그룹용어(여러 PT) | `Serious skin reactions` | `Serious skin reactions, stevens-johnson syndrome\|toxic epidermal necrolysis\|drug reaction with eosinophilia and systemic symptoms` |
+| 동의어 | `Liver failure` | `Liver failure, hepatic failure` |
+| 표현차 | `QT prolongation` | `QT prolongation, electrocardiogram qt prolonged` |
+| 범주어 | `Cardiopulmonary reactions` | (해당 PT들 판단해 매핑) |
+| 서술형 | `Overdose due to labeling confusion` | `Overdose due to labeling confusion, overdose\|product label confusion` |
 
-정규화는 성분/반응 모두 **메인 신호표와 같은 vocab**으로.
+→ 실패 signal 전체 목록은 장수연이 뽑아 전달. 각 행에 올바른 PT만 채우면 됨.
+⚠️ **자동 유사도 매칭 금지** — `Renal toxicity → retinal toxicity`(신장↔망막) 같은 오매칭으로 정답지
+오염됨. **반드시 의학적으로 맞는 PT를 사람이 판단.**
+
+> 참고: 이건 **반응쪽 커버리지**를 올린다. recall(순위 정확도)은 이걸로 안 오른다(그건 §0 랭킹/피처).
 
 ---
 
-## 6. 커버리지 더 올리기
+## 6. 커버리지 — 정식 해법 (정답지 성분 정규화, 이지훈)
 
-v1 커버리지 **키생성 68.9% / OK존재 59.4%**(클래스 제외). 레버:
+현재 `drug_ingredient_map` + 리졸버가 정답지 `product`를 성분으로 **임시 번역** 중. 정식 해법 =
+**정답지 `product`를 FAERS 성분 정규화기(= `fct_signal_scores.ingredient`를 만든 그 파이프라인)에
+똑같이 태워 `gold_ingredient_norm` 생성** → 채점기는 canonical로만 조인(노트 ③ 복귀).
+(성분은 이미 95% 맞아 우선순위 낮음. 반응=§5가 더 큰 레버.)
 
-1. **정답지 성분 정규화(이지훈)** — `gold.product → gold_ingredient_norm`을 FAERS 성분 정규화기로 생성.
-   그러면 염/브랜드/철자 regex 폴백 불필요(노트 ③ 복귀). = 커버리지 올리는 **정식 방법.**
-2. **반응 사전 확장(함하경)** — `reaction_dict_final.csv`는 118행. 실패 signal 135건 + 퍼지 제안 =
-   `Downloads/reaction_dict_worklist.csv`. `승인PT` 칸만 채워 사전에 append.
-   ⚠️ 자동주입 금지(`Renal toxicity→retinal toxicity` 오매칭) — **사람 검토 필수.**
-3. **클래스 행** — 성분단위 범위 밖(기본 제외). 넣으려면 클래스→성분목록 사전으로 "구성성분 중 하나라도 탐지"로.
-
-> 참고: **커버리지 ≠ recall.** 커버리지 올려도 recall은 안 오른다(랭킹 문제). 상세 `docs/v1-backtest-results.md`.
+클래스 수준 정답지(NSAIDs 등)는 성분단위 범위 밖(기본 제외). 넣으려면 클래스→성분목록 사전 필요.
 
 ---
 
 ## 7. 인프라 / 함정
 
 - **EC2 접속 = SSM 세션(대화형)만.** `aws ssm start-session --target <id> --profile faers`.
-- 🔑 **[요청] Claude 직접 실행 권한:** 지금 `boaz_3`가 `ssm:SendCommand` **AccessDenied**라 EC2 집계를
-  사람이 SSM 웹터미널에 복붙해야 함. **`boaz_3`(또는 전용 IAM)에 `ssm:SendCommand` 또는 SSH 접속을
-  열어주면** Claude가 집계·백테스트를 직접 실행(복붙 제거). → AWS 관리자에게 요청. (`ce:GetCostAndUsage`도 막힘)
+- 🔑 **[요청] Claude 직접 실행 권한:** `boaz_3`가 `ssm:SendCommand` **AccessDenied**라 EC2 집계를
+  사람이 복붙해야 함. **`boaz_3`에 `ssm:SendCommand`(또는 SSH)를 열어주면** Claude가 직접 실행(복붙 제거).
+  → AWS 관리자 요청. (`ce:GetCostAndUsage`도 막힘)
 - **S3 브릿지:** `s3://boaz-1234-825494477740-ap-northeast-2-an/iceberg_warehouse/stage_c_silver/stage3/`
-  (`--profile faers`로 read/write). EC2 집계는 리전 내라 egress $0, 로컬에서 S3 끌면 egress 발생.
+  (`--profile faers`). EC2 집계는 리전 내라 egress $0, 로컬에서 S3 끌면 egress 발생.
 - **GPU 비용:** g6.xlarge ≈ 시간당 ~$1. **작업 끝나면 반드시 인스턴스 정지.**
 - **Windows:** 경로 `C:/...`, 콘솔 UTF-8, 실행 `PYTHONPATH=.`.
 - **메모:** `memory/d-backtest-harness-versions.md`, `d-v1-first-backtest-result.md`, `d-v2-pit-leadtime-result.md`.
@@ -152,12 +175,14 @@ v1 커버리지 **키생성 68.9% / OK존재 59.4%**(클래스 제외). 레버:
 
 ## 8. 체크리스트
 
-- [ ] (이수연) v2 as_of 분기 스냅샷 (dbt에 날짜 컷오프 파라미터, 메인과 동일 로직) → `first_detection.csv`
+**결정:** [ ] v1에서 멈춤 / [ ] v2~v5 진행 (§0)
+
+진행 시:
+- [ ] (장수연) `ic025×log(a)`를 `scoring/ranking.py` 랭킹 옵션으로 추가 (검증된 개선)
+- [ ] (이수연) v2 as_of 분기 스냅샷 (dbt 날짜 컷오프, 메인과 동일 로직) → `first_detection.csv`
 - [ ] (이수연) v3~5 피처 컬럼을 `fct_signal_scores`에 통합·export
-- [ ] (이지훈) v3/4/5 피처 집계: `death_frac`(OUTC)·`dechal_frac`·`rechal_frac`(DRUG)·`recency`(DEMO)
-- [ ] (이지훈) OpenFDA 라벨에서 조치 분기 추출 → gold `action_q`
+- [ ] (이지훈) v3/4/5 피처 집계: `death_frac`(OUTC)·`dechal/rechal_frac`(DRUG)·`recency`(DEMO)
 - [ ] (이지훈) 정답지 product 성분 정규화 → `gold_ingredient_norm`
-- [ ] (함하경) `reaction_dict_worklist.csv` 승인 → `reaction_dict` 확장
+- [ ] (함하경) `reaction_dict_final.csv`에 실패 signal→PT 행 추가 (§5)
 - [ ] (AWS 관리자) `boaz_3`에 `ssm:SendCommand`(또는 SSH) → Claude EC2 직접 실행
-- [ ] (장수연) 데이터 들어올 때마다 백테스트 운영 + `ic025×log(a)` 등 랭킹 실험 + 결과 해석·통합
-- [ ] (장수연) 각 버전 `PYTHONPATH=. python -m scoring.backtest --version vN --gate` → 커버리지·Lift 확인
+- [ ] (장수연) 데이터 들어올 때마다 `python -m scoring.backtest --version vN --gate` → 커버리지·Lift 확인
