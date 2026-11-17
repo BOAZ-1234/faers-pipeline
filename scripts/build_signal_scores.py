@@ -4,9 +4,11 @@ dbt(contracts/dbt)가 설치 안 된 박스에서도 돌게, b_stage/fct_case_dr
 gold/fct_signal_scores.sql 의 로직을 그대로 옮겨 S3 Iceberg(A단계 원본)를 직접 집계한다.
 dbt도 내부적으론 duckdb로 같은 SQL을 돌리므로 결과는 동일하다.
 
-입력(기본값 = 함하경 prod_run3 본실행 산출물, [[cstage-prod-run3-outputs-location]]):
+입력(C단계 prod_run3 본실행 산출물 — 원본은 함하경 out/prod_run3/final):
   --raw-map       raw_drug_name,entity_id          (dbt의 raw_name_entity_map.csv)
   --resolution    entity_id,resolved_ingredient_set (dbt의 resolution_merged.csv)
+기본 입력 경로는 $D_PRODRUN (기본값 ~/prod_run3/final) — 개인 홈 경로를 박지 않는다.
+  export D_PRODRUN=~/prod_run3/final   # 또는 --raw-map/--resolution 로 직접 지정
 출력: ingredient,pt,a,ic025 CSV (scoring.backtest --signals 입력)
 
 실행:
@@ -26,7 +28,8 @@ import time
 HOME = os.path.expanduser("~")
 S3_DEFAULT = ("s3://boaz-1234-825494477740-ap-northeast-2-an/"
               "iceberg_warehouse/stage_a_raw")
-PRODRUN = f"{HOME}/함하경/faers-pipeline/out/prod_run3/final"
+# 개인 홈 경로를 하드코딩하지 않는다 — $D_PRODRUN 로 덮거나 --raw-map/--resolution 지정.
+PRODRUN = os.environ.get("D_PRODRUN", f"{HOME}/prod_run3/final")
 
 
 def main() -> int:

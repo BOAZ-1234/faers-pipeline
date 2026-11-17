@@ -18,8 +18,19 @@
 그래서 v1·v2는 IC025로 그냥 정렬하고(학습 불필요), v3부터 피처가 2개 이상이 되어
 로지스틱 회귀로 결합한다. 정규화(shrinkage)가 작은 학습셋의 과적합을 억제한다.
 
+v1e(증거량 가중, 헤드라인 재현용):
+  v1(IC025 단독)과 v3(학습 결합) 사이에, 새 피처·학습 없이 **기존 증거량만 반영**한
+  `IC025 × log(a)` 변형. 흔한 신호(a 큼)의 순위를 끌어올려 IC025 단독의 구조적 한계를
+  보완한다. 학습이 없어 누수가 원천적으로 없다(정답지와 무관하게 점수가 정해진다).
+
+누수 방지 (학습 결합 v3~v5):
+  로지스틱 회귀는 정답지(positives/negatives)로 학습하므로, 학습에 쓴 양성을 그대로
+  채점하면 성능이 과대평가된다(in-sample). 그래서 **라벨된 점은 OOF(out-of-fold)로
+  채점**한다 — 각 양성/음성은 자기를 학습에 쓰지 않은 모델이 매긴 점수만 받는다.
+  라벨 없는 후보는 전량 학습 모델로 점수를 매긴다(이쪽은 정답이 없어 누수 없음).
+
 데이터 가용성(2026-11 기준):
-  · v1/v2 — `fct_signal_scores`의 `ic025`·`a`만 있으면 됨 → **지금 실행 가능**.
+  · v1/v1e/v2 — `fct_signal_scores`의 `ic025`·`a`만 있으면 됨 → **지금 실행 가능**.
   · v3~v5 — 중대성/끊음·재투여/최근성 피처는 아직 GOLD 테이블에 없다. signals DF에
     해당 컬럼이 없으면 `FeatureUnavailable`로 "무슨 컬럼이 필요한지" 알려준다
     (가짜로 채우지 않음). 피처 테이블이 생기면 그 컬럼만 조인해 넘기면 바로 돈다.
@@ -90,6 +101,8 @@ class VersionSpec:
 
 VERSIONS: dict[str, VersionSpec] = {
     "v1": VersionSpec("v1", ("ic025",), False, "ic025", "IC025 단독 — 파이프라인 완주"),
+    "v1e": VersionSpec("v1e", ("ic025",), False, "ic025_log_a",
+                       "IC025 × log(a) — 증거량 가중(헤드라인 재현용, 학습 없음)"),
     "v2": VersionSpec("v2", ("ic025",), True, "ic025", "+ 시점 라벨 필터(이진 제거)"),
     "v3": VersionSpec("v3", ("ic025", "death_frac"), True, "logreg", "+ 중대성(사망분율)"),
     "v4": VersionSpec(
@@ -259,9 +272,14 @@ def build_ranking(
     universe_size = len(df)
 
     # 4) 결합 → 점수
-    if spec.combiner == "ic025" or len(spec.features) == 1:
+    if spec.combiner == "ic025":
         scores = df[IC025_COL].to_numpy(dtype=float)
         meta["combiner"] = "ic025"
+    elif spec.combiner == "ic025_log_a":
+        # 증거량 가중: IC025 × log(a). a는 공출현 case 수(a≥1, 게이트 시 a≥3).
+        a = df[COUNT_COL].to_numpy(dtype=float)
+        scores = df[IC025_COL].to_numpy(dtype=float) * np.log(np.maximum(a, 1.0))
+        meta["combiner"] = "ic025_log_a"
     else:
         scores, cmeta = _logreg_scores(
             df, keys, feature_cols, spec, positives, negatives, l2
@@ -284,8 +302,16 @@ def _logreg_scores(
     positives: Iterable[SignalKey] | None,
     negatives: Iterable[SignalKey] | None,
     l2: float,
+    n_folds: int = 5,
 ) -> tuple[np.ndarray, dict]:
-    """학습 결합 점수. 라벨 부족 시 ic025 fallback."""
+    """학습 결합 점수 — 라벨된 점은 OOF로 채점(in-sample 누수 방지).
+
+    · 라벨 없는 후보  : 전량 학습 모델(모든 라벨로 적합)로 점수 — 정답이 없어 누수 없음.
+    · 라벨된 양성/음성: 층화 k-겹으로 나눠, 자기가 속한 겹을 뺀 모델로만 점수(OOF).
+                        → 채점에 쓰는 양성을 그 양성으로 학습한 모델이 매기지 않는다.
+    라벨 부족(양/음성 < 2) 시 ic025 정렬로 fallback.
+    계수 보고(coef)는 전체 라벨로 적합한 모델 기준(해석용, 채점과 분리).
+    """
     pos = set(positives or ())
     neg = set(negatives or ())
     X = df[feature_cols].to_numpy(dtype=float)
@@ -298,8 +324,9 @@ def _logreg_scores(
         elif k in neg:
             y[i] = 0.0
     labeled = ~np.isnan(y)
-    n_pos = int((y[labeled] == 1).sum())
-    n_neg = int((y[labeled] == 0).sum())
+    pos_idx = np.where(y == 1.0)[0]
+    neg_idx = np.where(y == 0.0)[0]
+    n_pos, n_neg = len(pos_idx), len(neg_idx)
 
     if n_pos < 2 or n_neg < 2:
         warnings.warn(
@@ -312,10 +339,32 @@ def _logreg_scores(
             "n_pos_train": n_pos, "n_neg_train": n_neg,
         }
 
-    model = fit_shrinkage_logreg(X[labeled], y[labeled], spec.features, l2=l2)
-    scores = model.predict_proba(X)
+    # 전체 라벨 모델: 라벨 없는 후보 채점 + 계수 보고용
+    full = fit_shrinkage_logreg(X[labeled], y[labeled], spec.features, l2=l2)
+    scores = full.predict_proba(X)
+
+    # OOF: 라벨된 점은 층화 k-겹으로 (결정적, 난수 없음 — 등장 순서로 배정)
+    k = max(2, min(n_folds, n_pos, n_neg))
+    fold = np.full(len(keys), -1, dtype=int)
+    for j, idx in enumerate(pos_idx):
+        fold[idx] = j % k
+    for j, idx in enumerate(neg_idx):
+        fold[idx] = j % k
+
+    oof_scored = 0
+    for f in range(k):
+        test = labeled & (fold == f)
+        train = labeled & (fold != f)
+        ytr = y[train]
+        if (ytr == 1).sum() < 1 or (ytr == 0).sum() < 1:
+            continue  # 학습 겹에 한 클래스가 없으면 전체 모델 점수 유지(드묾)
+        m = fit_shrinkage_logreg(X[train], ytr, spec.features, l2=l2)
+        scores[test] = m.predict_proba(X[test])
+        oof_scored += int(test.sum())
+
     return scores, {
         "combiner": "logreg",
         "n_pos_train": n_pos, "n_neg_train": n_neg,
-        "coef": model.coef_report(), "intercept": float(model.b),
+        "oof_folds": k, "oof_scored": oof_scored,
+        "coef": full.coef_report(), "intercept": float(full.b),
     }

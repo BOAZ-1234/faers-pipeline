@@ -12,8 +12,14 @@
 
 IC025 = log2((a+0.5)/(E+0.5)) - 3.3·(a+0.5)^-0.5 - 2·(a+0.5)^-1.5,  E=ab·ac/N.
 게이트·공식(IC025)·분기정의(선형 year*4+분기)는 scoring/pit.py 의 quarter_index 와 동일.
+반응(pt) 매칭은 gold_pt(정규화)와 fact.pt(raw) 표기차 때문에 **대소문자/공백 무시**로 맞춘다.
 
-최신 caseversion 은 cutoff별이 아니라 **전체 최신 1회**로 근사(속도) — v2 첫 수치엔 충분.
+⚠ PIT 한계(미래정보): 최신 caseversion 을 cutoff별이 아니라 **전체 기간 최신 1회**로
+  근사한다(속도). 그래서 분기 Q 시점 집계에 Q 이후 갱신된 caseversion 의
+  ingredient_set/pt 가 섞일 수 있다 → 리드타임이 실제보다 과대(조기 탐지로 보일) 가능.
+  v2 '첫 수치'엔 충분하지만, **엄밀한 PIT 는 cutoff별(q<=Q) 최신 caseversion 으로
+  _base 를 다시 떠야 한다**(_base 를 (caseid,Q)별 argmax(caseversion)로 교체). 리드타임
+  리포트에 이 한계를 함께 적을 것. 실행 시 아래 배너로도 경고한다.
 
 실행(EC2):
   nohup python3 ~/finish_pit.py > ~/finish_pit.log 2>&1 &
@@ -46,6 +52,11 @@ def main() -> int:
 
     def log(m: str) -> None:
         print(f"[{time.time()-t0:5.0f}s] {m}", flush=True)
+
+    print("=" * 70, flush=True)
+    print("⚠ PIT 근사: caseversion 을 전체 최신 1회로 잡는다(미래정보 가능).", flush=True)
+    print("   리드타임은 과대 추정일 수 있음 — 리포트에 한계 명시 필수.", flush=True)
+    print("=" * 70, flush=True)
 
     # 사전 점검: 필요한 테이블 존재 확인
     tabs = {r[0] for r in con.execute(
@@ -89,10 +100,18 @@ def main() -> int:
         select cr.pt, cr.caseid, cq.q
         from (select distinct caseid, pt from _base
               where pt is not null and pt<>''
-                and pt in (select pt from gold_pt)) cr
+                and upper(trim(pt)) in (select upper(trim(pt)) from gold_pt)) cr
         join _caseq cq using(caseid)""")
-    log(f"    _cdq {con.execute('select count(*) from _cdq').fetchone()[0]:,} / "
-        f"_crq {con.execute('select count(*) from _crq').fetchone()[0]:,}")
+    ncrq = con.execute('select count(*) from _crq').fetchone()[0]
+    log(f"    _cdq {con.execute('select count(*) from _cdq').fetchone()[0]:,} / _crq {ncrq:,}")
+    if ncrq == 0:
+        print("ERROR: _crq 0행 — gold_pt 와 fact.pt 표기 불일치(대소문자 외 원인). "
+              "샘플 확인 필요.", flush=True)
+        print("  GOLD_PT", con.execute("select pt from gold_pt limit 6").fetchall(), flush=True)
+        print("  FACT_PT", con.execute(
+            "select distinct pt from _base where pt is not null and pt<>'' limit 6"
+        ).fetchall(), flush=True)
+        return 3
 
     # 4) 공출현 (ingredient, pt, caseid, 그 케이스 분기) — (ing,pt,caseid) 유일
     log("4/7 _co (공출현) ...")

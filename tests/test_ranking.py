@@ -143,4 +143,39 @@ def test_logreg_separates_linearly_separable():
 
 
 def test_all_versions_registered():
-    assert list(VERSIONS) == ["v1", "v2", "v3", "v4", "v5"]
+    assert list(VERSIONS) == ["v1", "v1e", "v2", "v3", "v4", "v5"]
+
+
+# ── v1e: IC025 × log(a) (증거량 가중, 헤드라인 재현) ─────────────────────────
+def test_v1e_weights_ic025_by_log_count():
+    import numpy as np
+    sig = _signals()
+    rr = build_ranking(sig, "v1e")
+    assert rr.meta["combiner"] == "ic025_log_a"
+    assert rr.universe_size == len(sig)
+    expected = {
+        make_key(r.ingredient, r.pt): r.ic025 * np.log(max(r.a, 1))
+        for r in sig.itertuples()
+    }
+    seq = [expected[k] for k in rr.ranking]
+    assert seq == sorted(seq, reverse=True)  # IC025×log(a) 내림차순
+
+
+def test_v1e_no_leakage_without_labels():
+    # 학습이 없으므로 positives/negatives 없이도 동일 점수 (누수 원천 차단)
+    sig = _signals()
+    a = build_ranking(sig, "v1e").ranking
+    pos, neg = _labels()
+    b = build_ranking(sig, "v1e", positives=pos, negatives=neg).ranking
+    assert a == b
+
+
+# ── v3~v5: OOF 채점(in-sample 누수 방지) ────────────────────────────────────
+def test_learned_versions_use_oof_scoring():
+    sig = _signals()
+    positives, negatives = _labels()
+    rr = build_ranking(sig, "v3", positives=positives, negatives=negatives)
+    # 라벨된 6점(양성3+음성3)은 OOF로 채점되어야 한다
+    assert rr.meta["combiner"] == "logreg"
+    assert rr.meta["oof_folds"] >= 2
+    assert rr.meta["oof_scored"] == 6
