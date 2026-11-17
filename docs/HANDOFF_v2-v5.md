@@ -13,10 +13,16 @@
 | 버전 | 추가 피처 | 필요 데이터(정제 대상) | 담당 |
 |---|---|---|---|
 | v1 | `ic025` | (완료) | ✅ |
-| v2 | 시점(PIT) 라벨 필터 | as_of 분기 스냅샷 | |
-| v3 | `+death_frac` | FAERS **OUTC** `outc_cod` | |
-| v4 | `+dechal_frac, rechal_frac` | FAERS **DRUG** `dechal`,`rechal` | |
-| v5 | `+recency` | FAERS **DEMO** `fda_dt` | |
+| v2 | 시점(PIT) 라벨 필터 | as_of 분기 스냅샷 + **OpenFDA 라벨(조치일)** | 이지훈 |
+| v3 | `+death_frac` | FAERS **OUTC** `outc_cod` | 이지훈 |
+| v4 | `+dechal_frac, rechal_frac` | FAERS **DRUG** `dechal`,`rechal` | 이지훈 |
+| v5 | `+recency` | FAERS **DEMO** `fda_dt` | 이지훈 |
+
+**역할 분담**
+- **이지훈 — v2~v5 데이터 정제(한 명이 전담):** v3/4/5 피처 집계(OUTC/DRUG/DEMO) + v2 as_of
+  스냅샷 + OpenFDA 라벨 조치일 추출 + (가능하면) 정답지 성분 정규화(§5).
+- **이수연 — signals/dbt:** 위 산출물을 dbt GOLD `fct_signal_scores`에 통합·컬럼 추가·export.
+- **함하경 — 부작용 사전:** `reaction_dict` 확장(§5 워크리스트 검토).
 
 - v1~v2는 `ic025`로 정렬. **v3~v5는 shrinkage 로지스틱 회귀(numpy, sklearn無)로 가중치 학습** —
   `signals` 파일에 피처 컬럼만 있으면 `build_ranking`이 자동으로 쓴다.
@@ -107,10 +113,17 @@ PYTHONPATH=. python -m scoring.backtest \
 "FDA 조치보다 몇 분기 먼저 신호가 떴나" (컨퍼런스 와우포인트). 전기간 합산본으론 불가, **시점별
 스냅샷 필요.**
 
-**데이터 정제(핵심):** fct_signal_scores를 **`fda_dt < 기준분기`로 잘라 분기별 집계**한 as_of
-스냅샷. ⚠️ **반드시 fct_signal_scores와 *동일한 집계 로직*(role 기준·resolution·caseversion)으로.**
-(현재 `scripts/finish_pit.py`가 raw iceberg를 따로 집계했더니 `a` 세는 법이 달라 커버리지가
-12/562로 붕괴 — 일관성이 전부다. 자세히: `memory/d-v2-pit-leadtime-result.md`)
+**데이터 정제 — 2종 필요:**
+
+1. **as_of 분기 스냅샷** (= 우리가 *언제* 탐지했나): fct_signal_scores를 **`fda_dt < 기준분기`로
+   잘라 분기별 집계.** ⚠️ **반드시 fct_signal_scores와 *동일한 집계 로직*(role·resolution·
+   caseversion)으로.** (현재 `scripts/finish_pit.py`가 raw iceberg를 따로 집계했더니 `a` 세는 법이
+   달라 커버리지 12/562로 붕괴 — 일관성이 전부다. 자세히: `memory/d-v2-pit-leadtime-result.md`)
+
+2. **OpenFDA 라벨 — FDA 조치일(분기)** (= FDA가 *언제* 조치했나): 리드타임 = 조치분기 − 최초탐지분기
+   이므로 **조치일이 정확해야** 한다. 현재 `leadtime_report.py`는 gold의 `first_year`(연 단위)를
+   쓰는데, **OpenFDA 라벨 변경 이력(openFDA drug label API / Drugs@FDA)에서 신호별 라벨변경·
+   안전성공지 날짜를 분기 단위로 뽑아** gold에 붙이면 리드타임이 정밀해진다. (이지훈)
 
 **실행 경로:**
 1. EC2에서 `scripts/finish_pit.py`(또는 `fix_pit.py`) → `first_detection.csv`(ingredient,pt,first_q), S3 자동 업로드.
@@ -148,6 +161,10 @@ v1 커버리지 **키생성 68.9% / OK존재 59.4%**(클래스 제외). 더 올�
 
 - **EC2 접속 = SSM 세션(대화형)만.** `aws ssm start-session --target <id> --profile faers`.
   `ssm:SendCommand`(원격 실행)·`ce:GetCostAndUsage`(비용) 권한은 막혀 있음.
+- 🔑 **[요청] Claude 직접 실행 권한:** 지금은 `boaz_3`가 `ssm:SendCommand` **AccessDenied**라
+  EC2 집계를 **사람이 SSM 웹터미널에 복붙**해야 함(비효율·오류원). **`boaz_3`(또는 전용 IAM)에
+  `ssm:SendCommand` 부여**하거나 **SSH 키 접속을 열어주면**, Claude가 집계·백테스트를 **직접
+  실행**(복붙 불필요, 결과 S3 자동업로드). → AWS 관리자에게 요청.
 - **S3 브릿지:** `s3://boaz-1234-825494477740-ap-northeast-2-an/iceberg_warehouse/stage_c_silver/stage3/`
   (스크립트·결과 올리고 내림, `--profile faers`). 스크립트가 결과 자동 업로드하게 해두면 편함.
 - **GPU 비용:** g6.xlarge ≈ 시간당 ~$1. **작업 끝나면 반드시 인스턴스 정지.**
@@ -159,8 +176,10 @@ v1 커버리지 **키생성 68.9% / OK존재 59.4%**(클래스 제외). 더 올�
 
 ## 7. 체크리스트 (팀원용)
 
-- [ ] (이수연) fct_signal_scores에 `death_frac`·`dechal_frac`·`rechal_frac`·`recency` 컬럼 추가
-- [ ] (이수연) v2용 as_of 분기 스냅샷 (fct와 동일 로직)
+- [ ] (이지훈) v3/4/5 피처 집계: `death_frac`(OUTC)·`dechal_frac`·`rechal_frac`(DRUG)·`recency`(DEMO)
+- [ ] (이지훈) v2 as_of 분기 스냅샷 (fct와 동일 로직) + **OpenFDA 라벨 조치일(분기) 추출**
+- [ ] (이지훈) 정답지 product를 FAERS 성분 정규화기로 정제 → `gold_ingredient_norm`
+- [ ] (이수연) 위 피처·스냅샷을 dbt GOLD `fct_signal_scores`에 통합·컬럼 추가·export
 - [ ] (함하경) `reaction_dict_worklist.csv` 승인 → reaction_dict 확장
-- [ ] (상류) 정답지 product를 FAERS 성분 정규화기로 정제 → gold_ingredient_norm
+- [ ] (AWS 관리자) `boaz_3`에 `ssm:SendCommand` 권한(또는 SSH) → **Claude EC2 직접 실행**
 - [ ] 각 버전 `PYTHONPATH=. python -m scoring.backtest --version vN --gate` → 커버리지·Lift 확인
