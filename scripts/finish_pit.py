@@ -11,7 +11,7 @@
   - 각 (ing,pt)에 대해 게이트(a>=3 & IC025>0) 처음 통과하는 Q = first_q.
 
 IC025 = log2((a+0.5)/(E+0.5)) - 3.3·(a+0.5)^-0.5 - 2·(a+0.5)^-1.5,  E=ab·ac/N.
-게이트·공식·분기정의(선형 year*4+분기)는 build_first_detection.py 의 _agg_sql 과 동일.
+게이트·공식(IC025)·분기정의(선형 year*4+분기)는 scoring/pit.py 의 quarter_index 와 동일.
 
 최신 caseversion 은 cutoff별이 아니라 **전체 최신 1회**로 근사(속도) — v2 첫 수치엔 충분.
 
@@ -101,7 +101,7 @@ def main() -> int:
         from _cdq cdq join _crq crq using(caseid)""")
     log(f"    _co {con.execute('select count(*) from _co').fetchone()[0]:,}")
 
-    # 5) cutoff 격자 = 각 연도 Q4 (build_first_detection 와 동일, 선형 분기)
+    # 5) cutoff 격자 = 각 연도 Q4 (선형 분기)
     lo, hi = con.execute("select min(q), max(q) from _caseq").fetchone()
     lo, hi = int(lo), int(hi)
     con.execute(f"""CREATE OR REPLACE TABLE _grid AS

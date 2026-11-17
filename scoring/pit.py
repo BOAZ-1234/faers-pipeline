@@ -88,7 +88,7 @@ def leadtime_from_first(
     positives_asof: dict[SignalKey, int],
     first_detected: dict[SignalKey, int],
 ) -> list[LeadRow]:
-    """스냅샷 대신 '최초 탐지 분기'(build_first_detection.py 결과)로 바로 계산.
+    """스냅샷 대신 '최초 탐지 분기'(finish_pit.py 결과)로 바로 계산.
 
     positives_asof : {양성 키 → FDA 조치 분기(선형)}
     first_detected : {키 → 최초 게이트 통과 분기(선형)}

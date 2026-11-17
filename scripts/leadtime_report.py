@@ -1,6 +1,6 @@
 """v2 리드타임 리포트 (로컬) — EC2 first_detection.csv + gold 로 "조치보다 얼마나 앞서 떴나".
 
-build_first_detection.py(EC2) 가 뽑은 (ingredient,pt,first_q) 를 받아, gold 양성의
+finish_pit.py(EC2) 가 뽑은 (ingredient,pt,first_q) 를 받아, gold 양성의
 FDA 조치 분기와 비교해 리드타임을 낸다. 성분/반응 키 맞추기는 labelmap(실사전) 사용.
 
 실행:
