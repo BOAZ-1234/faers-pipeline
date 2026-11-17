@@ -78,3 +78,50 @@ def test_reject_records_land_in_quarantine_table_via_pyspark(local_iceberg_spark
     assert rejects[0].raw_line == "2$IBUPROFEN"
     assert rejects[1].expected_cols == 3 and rejects[1].actual_cols == 4
     assert rejects[1].raw_line == "3$TYLENOL$ORAL$EXTRA"
+
+
+# --- OUTC 적재 (#77) ----------------------------------------------------------
+
+def test_parse_args_defaults_keep_previous_behavior():
+    # 인자 없이 돌리면 예전과 같은 세 종류·같은 폴더 — OUTC가 몰래 끼어들지 않는다
+    mod = get_bronze_module()
+    types, zip_dir, chunk_size = mod.parse_args([])
+    assert types == ["DEMO", "DRUG", "REAC"]
+    assert zip_dir == "data/faers_not_load"
+    assert chunk_size == mod.CHUNK_SIZE
+
+
+def test_parse_args_selects_only_requested_types():
+    # OUTC만 지정하면 DRUG/REAC는 대상에서 빠진다(소급 manifest 전 재적재 시 중복 방지)
+    mod = get_bronze_module()
+    types, zip_dir, chunk_size = mod.parse_args(["--types", "outc", "--zip-dir", "data/faers_load",
+                                                 "--chunk-size", "200000"])
+    assert types == ["OUTC"]
+    assert zip_dir == "data/faers_load"
+    assert chunk_size == 200000
+
+
+def test_parse_args_rejects_unknown_type():
+    import pytest
+    mod = get_bronze_module()
+    with pytest.raises(SystemExit):
+        mod.parse_args(["--types", "OUTC,THER"])
+
+
+def test_outc_legacy_header_is_harmonized_via_pyspark(local_iceberg_spark):
+    # 2012Q4 OUTC만 헤더가 outc_code — outc_cod로 통일돼 최신 분기와 같은 테이블에 쌓여야 한다
+    mod = get_bronze_module()
+    mod.spark = local_iceberg_spark
+    table = "my_catalog.test_bronze.faers_outc_test"
+
+    mod.write_to_iceberg([["11", "1", "DE"]], ["primaryid", "caseid", "outc_code"], table, "OUTC",
+                         "faers_ascii_2012q4.zip")
+    mod.write_to_iceberg([["22", "2", "HO"], ["22", "2", "LT"]], ["primaryid", "caseid", "outc_cod"], table,
+                         "OUTC", "faers_ascii_2024Q1.zip")
+
+    df = local_iceberg_spark.table(table)
+    assert df.columns == ["primaryid", "caseid", "outc_cod", "source_zip"]
+    rows = sorted((r.primaryid, r.outc_cod, r.source_zip) for r in df.collect())
+    assert rows == [("11", "DE", "faers_ascii_2012q4.zip"),
+                    ("22", "HO", "faers_ascii_2024Q1.zip"),
+                    ("22", "LT", "faers_ascii_2024Q1.zip")]

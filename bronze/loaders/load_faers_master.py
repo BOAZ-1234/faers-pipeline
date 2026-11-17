@@ -1,7 +1,9 @@
 # FAERS 원본 데이터를 완벽하게 브론즈 계층에 쌓는 메인 마스터 적재 스크립트입니다.
-# data/faers_not_load/ 폴더 안의 모든 FAERS ZIP 파일을 찾아 연속으로 압축 해제 없이 다이렉트 스트리밍합니다.
+# --zip-dir(기본 data/faers_not_load/) 안의 FAERS ZIP을 압축 해제 없이 스트리밍하고, --types(기본 DEMO,DRUG,REAC)로 고른 파일만 적재합니다.
+# 예: OUTC만 추가 적재 —  python loaders/load_faers_master.py --types OUTC --zip-dir data/faers_load --chunk-size 200000   (cwd=bronze/)
 # 2012Q4 ~ 2014Q2 구간의 더러운 컬럼 구조(유령 문자, 공백, 누락 컬럼)를 최신 규격으로 자동 조화(Harmonize)하여 적재합니다.
 
+import argparse
 import sys
 import os
 import glob
@@ -27,8 +29,13 @@ NAMESPACE = "stage_a_raw"
 TARGET_MAPPING = {
     "DEMO": f"my_catalog.{NAMESPACE}.faers_demo",
     "DRUG": f"my_catalog.{NAMESPACE}.faers_drug",
-    "REAC": f"my_catalog.{NAMESPACE}.faers_reac"
+    "REAC": f"my_catalog.{NAMESPACE}.faers_reac",
+    # 신고별 결과(DE 사망·LT 생명위협·HO 입원·DS 장애·CA 선천기형·RI 처치필요·OT 기타) — D단계 v3 death_frac
+    "OUTC": f"my_catalog.{NAMESPACE}.faers_outc",
 }
+# 인자 없이 실행하면 예전과 똑같이 이 세 종류만, 이 폴더에서 적재한다(OUTC는 --types로 명시할 때만).
+DEFAULT_TYPES = ["DEMO", "DRUG", "REAC"]
+DEFAULT_ZIP_DIR = "data/faers_not_load"
 
 # 설계 문서 4-1: 컬럼 개수가 안 맞는 실패 레코드는 버리지 않고 이 테이블에 격리한다.
 REJECTS_TABLE = f"my_catalog.{NAMESPACE}.faers_load_rejects"
@@ -61,11 +68,15 @@ def harmonize_legacy_schema(df, table_type):
     elif table_type == "DRUG" and "lot_nbr" in df.columns:
         df = df.withColumnRenamed("lot_nbr", "lot_num")
 
+    elif table_type == "OUTC" and "outc_code" in df.columns:  # 2012Q4만 outc_code, 2013Q1부터 outc_cod
+        df = df.withColumnRenamed("outc_code", "outc_cod")
+
     # 3. 최신 타겟 스키마(정답지) 정의 (source_zip: 재시작 안전장치용, 어느 zip에서 왔는지 추적)
     target_schemas = {
         "DEMO": ['primaryid', 'caseid', 'caseversion', 'i_f_code', 'event_dt', 'mfr_dt', 'init_fda_dt', 'fda_dt', 'rept_cod', 'auth_num', 'mfr_num', 'mfr_sndr', 'lit_ref', 'age', 'age_cod', 'age_grp', 'sex', 'e_sub', 'wt', 'wt_cod', 'rept_dt', 'to_mfr', 'occp_cod', 'reporter_country', 'occr_country', 'source_zip'],
         "DRUG": ['primaryid', 'caseid', 'drug_seq', 'role_cod', 'drugname', 'prod_ai', 'val_vbm', 'route', 'dose_vbm', 'cum_dose_chr', 'cum_dose_unit', 'dechal', 'rechal', 'lot_num', 'exp_dt', 'nda_num', 'dose_amt', 'dose_unit', 'dose_form', 'dose_freq', 'source_zip'],
-        "REAC": ['primaryid', 'caseid', 'pt', 'drug_rec_act', 'source_zip']
+        "REAC": ['primaryid', 'caseid', 'pt', 'drug_rec_act', 'source_zip'],
+        "OUTC": ['primaryid', 'caseid', 'outc_cod', 'source_zip'],
     }
     
     target_cols = target_schemas.get(table_type)
@@ -145,8 +156,30 @@ def write_rejects_to_iceberg(reject_chunk):
         df.write.format("iceberg").mode("append").saveAsTable(REJECTS_TABLE)
 
 
-def run():
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description="FAERS 분기 zip → Iceberg(stage_a_raw) 적재")
+    p.add_argument("--types", default=",".join(DEFAULT_TYPES),
+                   help=f"적재할 파일 종류(쉼표). 기본 {','.join(DEFAULT_TYPES)}. 예: --types OUTC")
+    p.add_argument("--zip-dir", default=DEFAULT_ZIP_DIR,
+                   help=f"faers_*.zip 폴더 (기본 {DEFAULT_ZIP_DIR}, bronze/ 기준)")
+    # 청크마다 Iceberg 커밋(=데이터 파일 1개)이 생긴다. 3만 행 청크로 DRUG를 쌓다 파일 13,584개가 돼
+    # 컴팩션한 전례(PR#24) — 열이 적은 OUTC(3열)는 크게 잡아 커밋·파일 수를 줄인다.
+    p.add_argument("--chunk-size", type=int, default=CHUNK_SIZE,
+                   help=f"Iceberg 쓰기 1회당 행 수 (기본 {CHUNK_SIZE}). OUTC는 200000 권장")
+    args = p.parse_args(argv)
+    types = [t.strip().upper() for t in args.types.split(",") if t.strip()]
+    unknown = [t for t in types if t not in TARGET_MAPPING]
+    if unknown:
+        p.error(f"모르는 파일 종류: {unknown} (가능: {list(TARGET_MAPPING)})")
+    return types, args.zip_dir, args.chunk_size
+
+
+def run(argv=None):
     global spark
+    # 종류를 골라 적재한다 — load_manifest 소급 기록 전에는 DRUG/REAC을 전체 폴더로 재실행하면
+    # 중복 append되므로(액션플랜 A단계), 새 종류(OUTC)를 붙일 때는 그 종류만 지정한다.
+    types, zip_dir, chunk_size = parse_args(argv)
+    targets = {t: TARGET_MAPPING[t] for t in types}
 
     # 1. AWS 열쇠 장착
     load_dotenv()
@@ -177,8 +210,8 @@ def run():
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS my_catalog.{NAMESPACE}")
 
     # 5. faers_로 시작하는 모든 ZIP 파일 연속 파싱 작전!
-    zip_files = sorted(glob.glob("data/faers_not_load/faers_*.zip"), reverse=True)
-    print(f"\n📦 총 {len(zip_files)}개의 ZIP 파일을 발견했습니다. 파이프라인 가동을 시작합니다!\n" + "=" * 60)
+    zip_files = sorted(glob.glob(os.path.join(zip_dir, "faers_*.zip")), reverse=True)
+    print(f"\n📦 [{zip_dir}] 총 {len(zip_files)}개의 ZIP 파일, 적재 대상 {list(targets)}. 파이프라인 가동을 시작합니다!\n" + "=" * 60)
 
     for zip_path in zip_files:
         file_name = os.path.basename(zip_path)
@@ -187,7 +220,7 @@ def run():
         with zipfile.ZipFile(zip_path, 'r') as z:
             file_list = z.namelist()
 
-            for file_type, table_name in TARGET_MAPPING.items():
+            for file_type, table_name in targets.items():
                 target_file = [f for f in file_list if file_type in f.upper() and f.upper().endswith('.TXT')]
 
                 if not target_file:
@@ -225,11 +258,11 @@ def run():
                         else:
                             reject_chunk.append(reject)
 
-                        if len(chunk) >= CHUNK_SIZE:
+                        if len(chunk) >= chunk_size:
                             total_count += len(chunk)
                             write_to_iceberg(chunk, header, table_name, file_type, file_name)
                             chunk = []
-                        if len(reject_chunk) >= CHUNK_SIZE:
+                        if len(reject_chunk) >= chunk_size:
                             total_rejected += len(reject_chunk)
                             write_rejects_to_iceberg(reject_chunk)
                             reject_chunk = []
@@ -245,7 +278,7 @@ def run():
                                  row_count=total_count, rejected_count=total_rejected)
                 print(f"  ✅ [{file_type}] 총 {total_count}건 처리 완료! (컬럼 불일치로 격리된 레코드 {total_rejected}건 -> {REJECTS_TABLE})")
 
-    print("\n🎉 모든 ZIP 파일의 [DEMO, DRUG, REAC] 분리 적재 파이프라인이 완벽하게 종료되었습니다!")
+    print(f"\n🎉 모든 ZIP 파일의 {list(targets)} 분리 적재 파이프라인이 완벽하게 종료되었습니다!")
 
 
 if __name__ == "__main__":
