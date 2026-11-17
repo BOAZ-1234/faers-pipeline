@@ -12,15 +12,17 @@
 | 버전 | 추가 피처 | 필요 데이터 | 담당 |
 |---|---|---|---|
 | v1 | `ic025` | (완료) | ✅ |
-| v2 | 시점(PIT) 리드타임 | as_of 분기 스냅샷 + OpenFDA 조치일 | **이수연** |
+| v2 | 시점(PIT) 리드타임 | as_of 분기 스냅샷(이수연) + OpenFDA 조치일(이지훈) | **이수연·이지훈** |
 | v3 | `+death_frac` | FAERS OUTC `outc_cod` | **이지훈** |
 | v4 | `+dechal_frac, rechal_frac` | FAERS DRUG `dechal`,`rechal` | **이지훈** |
 | v5 | `+recency` | FAERS DEMO `fda_dt` | **이지훈** |
 
 **역할**
-- **이수연** — `fct_signal_scores`(dbt GOLD) 소유. v2 as_of 스냅샷·OpenFDA 조치일, v3~5 피처 컬럼 통합·export.
-- **이지훈** — v3/4/5 피처 집계(OUTC/DRUG/DEMO) + 정답지 성분 정규화(§5).
-- **함하경** — 부작용 사전(`reaction_dict`) 확장(§5).
+- **장수연** — 채점기/평가 하네스(`scoring/`) 소유. 백테스트 운영, 랭킹 실험(예: `ic025×log(a)`),
+  결과 해석·발표 스토리, 팀원 산출물 통합·검수.
+- **이수연** — `fct_signal_scores`(dbt GOLD) 소유. v2 as_of 스냅샷, v3~5 피처 컬럼 통합·export.
+- **이지훈** — v3/4/5 피처 집계(OUTC/DRUG/DEMO) + **OpenFDA 조치일 추출** + 정답지 성분 정규화(§5).
+- **함하경** — 부작용 사전(`reaction_dict`) 확장(§5 워크리스트 검토).
 
 - v1~v2는 `ic025`로 정렬, **v3~v5는 shrinkage 로지스틱 회귀(numpy)로 가중치 학습** —
   `signals`에 피처 컬럼만 있으면 `build_ranking`이 자동 사용. 피처는 **누적**(v5는 v3·v4 피처 전부 필요).
@@ -68,9 +70,9 @@ PYTHONPATH=. python -m scoring.backtest \
 **목표:** "FDA 조치보다 몇 분기 먼저 신호가 떴나" = **리드타임 = 조치분기 − 최초탐지분기** (컨퍼런스 와우포인트).
 전기간 합산본으론 불가 — 시점별로 뽑아야 한다.
 
-### 필요 데이터 2종 (이수연)
-- **(A) as_of 분기 스냅샷** = 우리가 *언제* 탐지했나.
-- **(B) OpenFDA 조치일** = FDA가 *언제* 조치했나.
+### 필요 데이터 2종
+- **(A) as_of 분기 스냅샷** = 우리가 *언제* 탐지했나. **(이수연)**
+- **(B) OpenFDA 조치일** = FDA가 *언제* 조치했나. **(이지훈)**
 
 ### 뽑는 법 — 단계별
 
@@ -151,10 +153,11 @@ v1 커버리지 **키생성 68.9% / OK존재 59.4%**(클래스 제외). 레버:
 ## 8. 체크리스트
 
 - [ ] (이수연) v2 as_of 분기 스냅샷 (dbt에 날짜 컷오프 파라미터, 메인과 동일 로직) → `first_detection.csv`
-- [ ] (이수연) OpenFDA 라벨에서 조치 분기 추출 → gold `action_q`
 - [ ] (이수연) v3~5 피처 컬럼을 `fct_signal_scores`에 통합·export
 - [ ] (이지훈) v3/4/5 피처 집계: `death_frac`(OUTC)·`dechal_frac`·`rechal_frac`(DRUG)·`recency`(DEMO)
+- [ ] (이지훈) OpenFDA 라벨에서 조치 분기 추출 → gold `action_q`
 - [ ] (이지훈) 정답지 product 성분 정규화 → `gold_ingredient_norm`
 - [ ] (함하경) `reaction_dict_worklist.csv` 승인 → `reaction_dict` 확장
 - [ ] (AWS 관리자) `boaz_3`에 `ssm:SendCommand`(또는 SSH) → Claude EC2 직접 실행
-- [ ] 각 버전 `PYTHONPATH=. python -m scoring.backtest --version vN --gate` → 커버리지·Lift 확인
+- [ ] (장수연) 데이터 들어올 때마다 백테스트 운영 + `ic025×log(a)` 등 랭킹 실험 + 결과 해석·통합
+- [ ] (장수연) 각 버전 `PYTHONPATH=. python -m scoring.backtest --version vN --gate` → 커버리지·Lift 확인
