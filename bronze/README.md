@@ -18,6 +18,11 @@
   ```bash
   cd bronze && python loaders/load_faers_master.py
   ```
+- `load_faers_master.py`는 기본으로 `data/faers_not_load/`의 DEMO·DRUG·REAC을 적재한다. **새 파일 종류만 추가로 적재할 때는 `--types`로 그 종류만 지정**한다 — faers `load_manifest` 소급 기록 전에는 DRUG/REAC을 전체 폴더로 다시 돌리면 중복 append된다.
+  ```bash
+  # OUTC(결과 코드, stage_a_raw.faers_outc) — 2026-11-17 적재: 55분기(2012Q4~2026Q2) 15,178,513행, 원본 zip과 분기별 일치
+  python loaders/load_faers_master.py --types OUTC --zip-dir data/faers_load --chunk-size 200000
+  ```
 - `loaders/` 밖에서 `spark_session.py`나 `pipeline_common.py`를 쓰려면 경로를 먼저 잡는다:
   ```python
   import sys, os
