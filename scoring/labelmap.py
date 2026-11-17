@@ -30,6 +30,43 @@ from scoring.ground_truth import (
 _PAREN = re.compile(r"[(]([^)]*)[)]")
 _SPLIT = re.compile(r",|;|/|\band\b")
 
+# ── 폴백 정규화(기존 매칭 실패 시에만 추가 후보 생성 → 순증 보장) ──────────────
+# 성분: 염·제형·용량 노이즈 제거 + 복합제/`and` 분해
+_SALT = re.compile(
+    r"\b(hydrochloride|hcl|mesylate|meglumine|sodium|potassium|calcium|sulfate|sulphate|"
+    r"phosphate|acetate|citrate|tartrate|maleate|succinate|fumarate|besylate|bromide|"
+    r"chloride|nitrate|dihydrate|monohydrate|hydrobromide|tosylate|disodium|hemifumarate|"
+    r"valerate|propionate|xinafoate|dipropionate|furoate|pamoate|base)\b")
+_FORM = re.compile(
+    r"\b(extended release|delayed release|modified release|oral|injection|tablet|tablets|"
+    r"capsule|capsules|solution|suspension|cream|gel|ointment|topical|intravenous|"
+    r"inhalation|nasal|ophthalmic|patch|spray)\b")
+_DOSE = re.compile(r"\d+\.?\d*\s?(mg|mcg|ml|units?|iu|%)\b|\d+\.?\d*\s?g\b|\d+\.?\d*%")
+# 반응: 서술 접두어 제거
+_PHRASE = re.compile(
+    r"^(interaction resulting in|overdose due to|adverse events? from|risk of|cases of|"
+    r"reports of|prolongation of the|labeling confusion resulting in|dosing confusion)\s*",
+    re.I)
+# 반응: 미국식→영국식 철자 (MedDRA PT 는 영국식)
+_BRITISH = [
+    ("hemorrhage", "haemorrhage"), ("hemo", "haemo"), ("hema", "haema"),
+    ("tumor", "tumour"), ("edema", "oedema"), ("diarrhea", "diarrhoea"),
+    ("anemia", "anaemia"), ("esophag", "oesophag"), ("gynec", "gynaec"),
+    ("leukemia", "leukaemia"), ("leukopenia", "leucopenia"), ("bleeding", "haemorrhage"),
+    ("fetal", "foetal"), ("estrogen", "oestrogen"), ("fecal", "faecal"),
+    ("anesth", "anaesth"), ("paresthesia", "paraesthesia"), ("celiac", "coeliac"),
+]
+
+
+def _to_british(s: str) -> str:
+    for a, b in _BRITISH:
+        s = s.replace(a, b)
+    # 접미사 패턴 (이미 변환된 형태엔 재적용 안 되게 가드) — 폴백 후보 전용이라 안전
+    s = re.sub(r"(?<![a])emia\b", "aemia", s)           # -emia → -aemia (hypocalcemia…)
+    s = re.sub(r"iz(e|es|ed|ing|ation)\b", r"is\1", s)  # -ize → -ise (necrotizing…)
+    s = re.sub(r"yz(e|es|ed|ing)\b", r"ys\1", s)        # -yze → -yse (paralyze…)
+    return s
+
 
 # ── 사전 로더 ────────────────────────────────────────────────────────────────
 def load_drug_map(path: str | Path,
@@ -37,7 +74,9 @@ def load_drug_map(path: str | Path,
                   val_col: str = "ingredient_norm") -> dict[str, str]:
     """product(canonical) → ingredient_norm. drug_ingredient_map.csv."""
     df = pd.read_csv(path, encoding="utf-8-sig", dtype=str).fillna("")
-    return {canonical(k): v for k, v in zip(df[key_col], df[val_col]) if v}
+    # canonical(k) 가 빈 문자열인 행 제외 — medicinalproduct 빈칸 쓰레기행이 빈 키로
+    # 들어가면 매칭 실패한 product 가 전부 그 값으로 오매칭됨(커버리지 뻥튀기 버그).
+    return {canonical(k): v for k, v in zip(df[key_col], df[val_col]) if v and canonical(k)}
 
 
 def load_reaction_map(path: str | Path,
@@ -52,12 +91,43 @@ def load_reaction_map(path: str | Path,
 
 
 # ── vocab 인식 리졸버 ────────────────────────────────────────────────────────
+# 정답지 product 가 '약물 클래스/군' 수준인지 (성분단위 스코어링 범위 밖) — 휴리스틱.
+# FDA 안전성 공지가 성분이 아니라 클래스로 내려온 행(NSAIDs, TNF blockers 등)을 걸러
+# 커버리지 분모에서 제외한다. 완전정확한 분류가 아니라 범위 정의용 1차 필터.
+_CLASS = re.compile(
+    r"inhibitor|blocker|agonist|antagonist|\bagents?\b|\bdrugs?\b|\bproducts?\b|"
+    r"nsaid|ssri|snri|modulator|corticosteroid|contrast media|\bstatins?\b|"
+    r"antivirals?|\bopioid", re.I)
+
+
+def is_class_level(product: str) -> bool:
+    """product 가 성분이 아니라 약물 클래스/군 수준이면 True (스코어링 범위 밖)."""
+    return bool(_CLASS.search(str(product)))
+
+
 def _paren_variants(s: str) -> list[str]:
     s = str(s)
     before = re.split(r"[(]", s)[0]
     m = _PAREN.search(s)
     inside = m.group(1) if m else ""
     return [s, before, inside]
+
+
+def _ing_fallback_variants(product: str) -> list[str]:
+    """염·제형·용량 제거 + 괄호 제거 + 복합제/`and` 분해 후보 (폴백 전용)."""
+    noparen = str(product).replace("(", " ").replace(")", " ")
+    before = re.split(r"[(]", str(product))[0]
+    m = _PAREN.search(str(product))
+    inside = m.group(1) if m else ""
+    out: list[str] = []
+    for b in (x for x in (noparen, before, inside) if x.strip()):
+        strip = _FORM.sub(" ", _SALT.sub(" ", _DOSE.sub(" ", b)))
+        out.append(strip)
+        for part in re.split(r"[/,]|\band\b", b):      # 복합제·'and' 분해
+            if part.strip():
+                out.append(part)
+                out.append(_FORM.sub(" ", _SALT.sub(" ", _DOSE.sub(" ", part))))
+    return out
 
 
 def make_ingredient_resolver(
@@ -73,6 +143,13 @@ def make_ingredient_resolver(
                 return canonical(c)
         for c in cands:                       # 2) 사전 경유
             v = drug_map.get(canonical(c))
+            if v and canonical(v) in ing_vocab:
+                return canonical(v)
+        for c in _ing_fallback_variants(product):   # 3) 폴백(염/제형/복합제 등)
+            cc = canonical(c)
+            if cc in ing_vocab:
+                return cc
+            v = drug_map.get(cc)
             if v and canonical(v) in ing_vocab:
                 return canonical(v)
         return None
@@ -99,7 +176,24 @@ def make_reaction_resolver(
             cp = canonical(part)
             if cp in pt_vocab:
                 out.add(cp)
-        return out
+        if out:
+            return out
+        # 폴백(위 직매칭 실패 시만): 영국식 철자·하이픈·복수·서술어·괄호약어 제거
+        s = str(signal)
+        nop = re.split(r"[(]", s)[0]           # 괄호약어 앞 본문 (SLE/DRESS/TEN/AGEP…)
+        forms = {s, _to_british(s), s.replace("-", " "), _to_british(s).replace("-", " "),
+                 _PHRASE.sub("", s), _to_british(_PHRASE.sub("", s)),
+                 nop, _to_british(nop), nop.replace("-", " "),
+                 _to_british(nop).replace("-", " ")}
+        cands: set[str] = set()
+        for f in forms:
+            cf = canonical(f)
+            cands.add(cf)
+            cands.add(re.sub(r"s\b", "", cf))  # 복수 제거
+            for part in _SPLIT.split(f):
+                cands.add(canonical(part))
+                cands.add(canonical(_to_british(part)))
+        return {c for c in cands if c and c in pt_vocab}
 
     return resolve
 
@@ -115,11 +209,13 @@ class EvalLabelSet:
 
     def summary(self) -> str:
         c = self.coverage
+        cls = c.get("pos_class_excluded", 0)
+        cls_s = f"  (클래스 {cls} 제외)" if cls else ""
         return (
             f"컷오프 {self.cutoff_year}  |  양성 {len(self.positives):,} / "
             f"음성 {len(self.negatives):,} / 봉인 {len(self.sealed):,}  |  "
             f"양성 pair 커버리지(키생성) {c.get('pos_keyed', 0)}/{c.get('pos_pairs', 0)} "
-            f"({c.get('pos_coverage', 0):.1%})"
+            f"({c.get('pos_coverage', 0):.1%}){cls_s}"
         )
 
 
@@ -131,8 +227,13 @@ def build_eval_labelset(
     drug_map: dict[str, str] | None = None,
     reaction_map: dict[str, list[str]] | None = None,
     min_resolution_rate: float = 0.75,
+    exclude_class_level: bool = True,
 ) -> EvalLabelSet:
-    """gold → vocab 검증·다중PT 확장 라벨셋. ing_vocab/pt_vocab 은 순위표에서 뽑는다."""
+    """gold → vocab 검증·다중PT 확장 라벨셋. ing_vocab/pt_vocab 은 순위표에서 뽑는다.
+
+    exclude_class_level=True (기본): 정답지 product 가 약물 클래스/군 수준인 행은
+    성분단위 스코어링 범위 밖이라 **양성 분모에서 제외**(커버리지 정의). [[is_class_level]]
+    """
     ing_of = make_ingredient_resolver(ing_vocab, drug_map)
     rx_of = make_reaction_resolver(pt_vocab, reaction_map)
 
@@ -149,6 +250,11 @@ def build_eval_labelset(
     pos_rows = scored[scored["label"] == POSITIVE]
     neg_rows = scored[scored["label"] == NEGATIVE]
     sealed_rows = pairs[pairs["label"] == PENDING]
+
+    # 클래스 수준 양성은 성분단위 범위 밖 → 분모에서 제외(기본)
+    n_class = int(pos_rows["product"].map(is_class_level).sum())
+    if exclude_class_level:
+        pos_rows = pos_rows[~pos_rows["product"].map(is_class_level)]
 
     positives: set[SignalKey] = set()
     pos_keyed = 0
@@ -176,6 +282,7 @@ def build_eval_labelset(
             "pos_keyed": pos_keyed,
             "pos_coverage": pos_keyed / len(pos_rows) if len(pos_rows) else 0.0,
             "pos_keys": len(positives),
+            "pos_class_excluded": n_class if exclude_class_level else 0,
         },
     )
 

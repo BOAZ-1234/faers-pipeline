@@ -71,6 +71,7 @@ def run(args: argparse.Namespace) -> int:
             gold, ing_vocab=ing_vocab, pt_vocab=pt_vocab,
             drug_map=load_drug_map(args.drug_map) if args.drug_map else None,
             reaction_map=load_reaction_map(args.reaction_dict) if args.reaction_dict else None,
+            exclude_class_level=not args.include_classes,
         )
     else:
         # 사전 없으면 얇은 항등 매퍼 (커버리지 낮음 — coverage 로 확인)
@@ -123,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--reaction-dict", default=None, help="signal→pt CSV")
     ap.add_argument("--gate", action="store_true",
                     help="표준 게이트 적용 (a≥3 AND IC025>0)")
+    ap.add_argument("--include-classes", action="store_true",
+                    help="약물 클래스 수준 정답지 행도 포함(기본: 제외, 성분단위 범위)")
     ap.add_argument("--ks", default="100,500,1000,5000", help="평가 K (쉼표)")
     ap.add_argument("--out", default=None, help="결과 JSON 경로")
     args = ap.parse_args(argv)
