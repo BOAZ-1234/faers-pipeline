@@ -54,24 +54,33 @@ case_reac as (
       on f.caseid = lv.caseid and f.caseversion = lv.caseversion
     where f.pt <> ''
 ),
+-- 원본 OUTC·DRUG는 키 단위로 미리 0/1 플래그로 접어서 조인한다 — 문자열 원본 행을 그대로
+-- 조인하면 조인 해시 테이블이 메모리 상한(8GB)을 넘는다(서버 실측 OOM).
 outc as (
-    select cast(primaryid as varchar) as primaryid, upper(trim(outc_cod)) as outc_cod
+    select
+        cast(primaryid as varchar) as primaryid,
+        max(case when upper(trim(outc_cod)) = 'DE' then 1 else 0 end) as is_death,
+        max(case when upper(trim(outc_cod)) in ('DE', 'LT', 'HO', 'DS', 'CA', 'RI') then 1 else 0 end) as is_serious
     from iceberg_scan('s3://boaz-1234-825494477740-ap-northeast-2-an/iceberg_warehouse/stage_a_raw/faers_outc')
+    group by 1
 ),
 drug_chal as (
     select
         cast(primaryid as varchar) as primaryid,
         try_cast(drug_seq as integer) as drug_seq,
-        upper(trim(dechal)) as dechal,
-        upper(trim(rechal)) as rechal
+        max(case when upper(trim(dechal)) = 'Y' then 1 else 0 end) as dechal_y,
+        max(case when upper(trim(rechal)) = 'Y' then 1 else 0 end) as rechal_y,
+        max(case when upper(trim(dechal)) in ('Y', 'N') then 1 else 0 end) as dechal_known,
+        max(case when upper(trim(rechal)) in ('Y', 'N') then 1 else 0 end) as rechal_known
     from iceberg_scan('s3://boaz-1234-825494477740-ap-northeast-2-an/iceberg_warehouse/stage_a_raw/faers_drug')
+    group by 1, 2
 ),
 -- 신고(최신판) 1건당 결과·접수일
 case_info as (
     select
         c.caseid,
-        max(case when o.outc_cod = 'DE' then 1 else 0 end) as is_death,
-        max(case when o.outc_cod in ('DE', 'LT', 'HO', 'DS', 'CA', 'RI') then 1 else 0 end) as is_serious,
+        max(coalesce(o.is_death, 0)) as is_death,
+        max(coalesce(o.is_serious, 0)) as is_serious,
         max(try_strptime(c.fda_dt, '%Y%m%d')) as fda_date
     from latest_case c
     left join outc o on c.primaryid = o.primaryid
@@ -85,10 +94,10 @@ case_drug as (
     select
         ld.caseid,
         trim(ing) as ingredient,
-        max(case when dc.dechal = 'Y' then 1 else 0 end) as dechal_y,
-        max(case when dc.rechal = 'Y' then 1 else 0 end) as rechal_y,
-        max(case when dc.dechal in ('Y', 'N') then 1 else 0 end) as dechal_known,
-        max(case when dc.rechal in ('Y', 'N') then 1 else 0 end) as rechal_known
+        max(coalesce(dc.dechal_y, 0)) as dechal_y,
+        max(coalesce(dc.rechal_y, 0)) as rechal_y,
+        max(coalesce(dc.dechal_known, 0)) as dechal_known,
+        max(coalesce(dc.rechal_known, 0)) as rechal_known
     from latest_drug ld
     cross join unnest(string_split(ld.ingredient_set, '|')) as t(ing)
     left join drug_chal dc
