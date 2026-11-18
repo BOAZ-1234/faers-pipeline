@@ -22,23 +22,44 @@
 -- 여러 행이라 신고별로 묶어서 센다. 결과 행이 아예 없는 신고는 사망·중대 아님(0)으로 센다.
 {{ config(materialized='table') }}
 
+-- 메모리: 617M행 원본을 최신판 전체 컬럼(latest_rows f.*)으로 한 번 뽑아 세 곳에서 다시 쓰면
+-- DuckDB가 그 중간 결과를 통째로 디스크에 써서(서버 실측 15분에 임시파일 55GB) 터진다. 그래서
+-- 원본은 필요한 컬럼만 뽑아 곧바로 작은 단위(신고 / 신고×약물 / 신고×부작용)로 줄이고,
+-- 신고 1건을 가리키는 표만 여러 번 쓴다. OUTC·DRUG 원본도 DISTINCT 없이 max로 묶는다
+-- (같은 행이 여러 번 있어도 max는 같아서 결과가 같다).
 with latest_version as (
     select caseid, max(caseversion) as caseversion
     from {{ ref('fct_case_drug_reaction') }}
     group by caseid
 ),
-latest_rows as (
-    select f.*
+-- 최신판 신고 1건당 접수일
+latest_case as (
+    select distinct f.caseid, f.primaryid, f.fda_dt
     from {{ ref('fct_case_drug_reaction') }} f
     join latest_version lv
       on f.caseid = lv.caseid and f.caseversion = lv.caseversion
 ),
+-- 최신판 신고의 PS/SS 약물 행(부작용 차원을 뺀 것)
+latest_drug as (
+    select distinct f.caseid, f.primaryid, f.drug_seq, f.ingredient_set
+    from {{ ref('fct_case_drug_reaction') }} f
+    join latest_version lv
+      on f.caseid = lv.caseid and f.caseversion = lv.caseversion
+    where f.role_cod in ('PS', 'SS') and f.ingredient_set <> ''
+),
+case_reac as (
+    select distinct f.caseid, f.pt
+    from {{ ref('fct_case_drug_reaction') }} f
+    join latest_version lv
+      on f.caseid = lv.caseid and f.caseversion = lv.caseversion
+    where f.pt <> ''
+),
 outc as (
-    select distinct cast(primaryid as varchar) as primaryid, upper(trim(outc_cod)) as outc_cod
+    select cast(primaryid as varchar) as primaryid, upper(trim(outc_cod)) as outc_cod
     from iceberg_scan('s3://boaz-1234-825494477740-ap-northeast-2-an/iceberg_warehouse/stage_a_raw/faers_outc')
 ),
 drug_chal as (
-    select distinct
+    select
         cast(primaryid as varchar) as primaryid,
         try_cast(drug_seq as integer) as drug_seq,
         upper(trim(dechal)) as dechal,
@@ -52,7 +73,7 @@ case_info as (
         max(case when o.outc_cod = 'DE' then 1 else 0 end) as is_death,
         max(case when o.outc_cod in ('DE', 'LT', 'HO', 'DS', 'CA', 'RI') then 1 else 0 end) as is_serious,
         max(try_strptime(c.fda_dt, '%Y%m%d')) as fda_date
-    from (select distinct caseid, primaryid, fda_dt from latest_rows) c
+    from latest_case c
     left join outc o on c.primaryid = o.primaryid
     group by c.caseid
 ),
@@ -62,23 +83,17 @@ ref_date as (
 -- 신고 × 성분: 같은 신고에 같은 성분 약물 행이 여럿이면 하나라도 Y면 Y
 case_drug as (
     select
-        lr.caseid,
+        ld.caseid,
         trim(ing) as ingredient,
         max(case when dc.dechal = 'Y' then 1 else 0 end) as dechal_y,
         max(case when dc.rechal = 'Y' then 1 else 0 end) as rechal_y,
         max(case when dc.dechal in ('Y', 'N') then 1 else 0 end) as dechal_known,
         max(case when dc.rechal in ('Y', 'N') then 1 else 0 end) as rechal_known
-    from latest_rows lr
-    cross join unnest(string_split(lr.ingredient_set, '|')) as t(ing)
+    from latest_drug ld
+    cross join unnest(string_split(ld.ingredient_set, '|')) as t(ing)
     left join drug_chal dc
-      on lr.primaryid = dc.primaryid and lr.drug_seq = dc.drug_seq
-    where lr.role_cod in ('PS', 'SS') and lr.ingredient_set <> ''
-    group by lr.caseid, trim(ing)
-),
-case_reac as (
-    select distinct caseid, pt
-    from latest_rows
-    where pt <> ''
+      on ld.primaryid = dc.primaryid and ld.drug_seq = dc.drug_seq
+    group by ld.caseid, trim(ing)
 )
 
 select
