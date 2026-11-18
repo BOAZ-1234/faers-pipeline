@@ -20,89 +20,14 @@
 --
 -- OUTC는 2026-11-17 적재(stage_a_raw.faers_outc, PR#77). 신고(primaryid)에 결과가 여러 개면
 -- 여러 행이라 신고별로 묶어서 센다. 결과 행이 아예 없는 신고는 사망·중대 아님(0)으로 센다.
+--
+-- 계산은 int_signal_* 중간 표로 나눠 저장한다 — 617M행 원본에서 한 쿼리로 돌리면 서버(16GB)에서
+-- 임시파일 폭증·OOM이 났다(2026-11-18 실측). 원본은 바로 작은 단위(신고 / 신고×성분 / 신고×부작용)로
+-- 줄여 저장하고, 여기선 그 셋을 caseid로 붙여 (ingredient, pt)별로 센다.
 {{ config(materialized='table') }}
 
--- 메모리: 617M행 원본을 최신판 전체 컬럼(latest_rows f.*)으로 한 번 뽑아 세 곳에서 다시 쓰면
--- DuckDB가 그 중간 결과를 통째로 디스크에 써서(서버 실측 15분에 임시파일 55GB) 터진다. 그래서
--- 원본은 필요한 컬럼만 뽑아 곧바로 작은 단위(신고 / 신고×약물 / 신고×부작용)로 줄이고,
--- 신고 1건을 가리키는 표만 여러 번 쓴다. OUTC·DRUG 원본도 DISTINCT 없이 max로 묶는다
--- (같은 행이 여러 번 있어도 max는 같아서 결과가 같다).
-with latest_version as (
-    select caseid, max(caseversion) as caseversion
-    from {{ ref('fct_case_drug_reaction') }}
-    group by caseid
-),
--- 최신판 신고 1건당 접수일
-latest_case as (
-    select distinct f.caseid, f.primaryid, f.fda_dt
-    from {{ ref('fct_case_drug_reaction') }} f
-    join latest_version lv
-      on f.caseid = lv.caseid and f.caseversion = lv.caseversion
-),
--- 최신판 신고의 PS/SS 약물 행(부작용 차원을 뺀 것)
-latest_drug as (
-    select distinct f.caseid, f.primaryid, f.drug_seq, f.ingredient_set
-    from {{ ref('fct_case_drug_reaction') }} f
-    join latest_version lv
-      on f.caseid = lv.caseid and f.caseversion = lv.caseversion
-    where f.role_cod in ('PS', 'SS') and f.ingredient_set <> ''
-),
-case_reac as (
-    select distinct f.caseid, f.pt
-    from {{ ref('fct_case_drug_reaction') }} f
-    join latest_version lv
-      on f.caseid = lv.caseid and f.caseversion = lv.caseversion
-    where f.pt <> ''
-),
--- 원본 OUTC·DRUG는 키 단위로 미리 0/1 플래그로 접어서 조인한다 — 문자열 원본 행을 그대로
--- 조인하면 조인 해시 테이블이 메모리 상한(8GB)을 넘는다(서버 실측 OOM).
-outc as (
-    select
-        cast(primaryid as varchar) as primaryid,
-        max(case when upper(trim(outc_cod)) = 'DE' then 1 else 0 end) as is_death,
-        max(case when upper(trim(outc_cod)) in ('DE', 'LT', 'HO', 'DS', 'CA', 'RI') then 1 else 0 end) as is_serious
-    from iceberg_scan('s3://boaz-1234-825494477740-ap-northeast-2-an/iceberg_warehouse/stage_a_raw/faers_outc')
-    group by 1
-),
-drug_chal as (
-    select
-        cast(primaryid as varchar) as primaryid,
-        try_cast(drug_seq as integer) as drug_seq,
-        max(case when upper(trim(dechal)) = 'Y' then 1 else 0 end) as dechal_y,
-        max(case when upper(trim(rechal)) = 'Y' then 1 else 0 end) as rechal_y,
-        max(case when upper(trim(dechal)) in ('Y', 'N') then 1 else 0 end) as dechal_known,
-        max(case when upper(trim(rechal)) in ('Y', 'N') then 1 else 0 end) as rechal_known
-    from iceberg_scan('s3://boaz-1234-825494477740-ap-northeast-2-an/iceberg_warehouse/stage_a_raw/faers_drug')
-    group by 1, 2
-),
--- 신고(최신판) 1건당 결과·접수일
-case_info as (
-    select
-        c.caseid,
-        max(coalesce(o.is_death, 0)) as is_death,
-        max(coalesce(o.is_serious, 0)) as is_serious,
-        max(try_strptime(c.fda_dt, '%Y%m%d')) as fda_date
-    from latest_case c
-    left join outc o on c.primaryid = o.primaryid
-    group by c.caseid
-),
-ref_date as (
-    select max(fda_date) as max_fda_date from case_info
-),
--- 신고 × 성분: 같은 신고에 같은 성분 약물 행이 여럿이면 하나라도 Y면 Y
-case_drug as (
-    select
-        ld.caseid,
-        trim(ing) as ingredient,
-        max(coalesce(dc.dechal_y, 0)) as dechal_y,
-        max(coalesce(dc.rechal_y, 0)) as rechal_y,
-        max(coalesce(dc.dechal_known, 0)) as dechal_known,
-        max(coalesce(dc.rechal_known, 0)) as rechal_known
-    from latest_drug ld
-    cross join unnest(string_split(ld.ingredient_set, '|')) as t(ing)
-    left join drug_chal dc
-      on ld.primaryid = dc.primaryid and ld.drug_seq = dc.drug_seq
-    group by ld.caseid, trim(ing)
+with ref_date as (
+    select max(fda_date) as max_fda_date from {{ ref('int_signal_case') }}
 )
 
 select
@@ -117,8 +42,8 @@ select
     cast(sum(cd.rechal_known)                                   as integer) as rechal_known_n,
     cast(avg(case when ci.fda_date >= rd.max_fda_date - interval 2 year then 1 else 0 end)
                                                                 as double)  as recency
-from case_drug cd
-join case_reac cr on cd.caseid = cr.caseid
-join case_info ci on cd.caseid = ci.caseid
+from {{ ref('int_signal_case_drug') }} cd
+join {{ ref('int_signal_case_reac') }} cr on cd.caseid = cr.caseid
+join {{ ref('int_signal_case') }} ci on cd.caseid = ci.caseid
 cross join ref_date rd
 group by cd.ingredient, cr.pt

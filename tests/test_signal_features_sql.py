@@ -65,7 +65,9 @@ def con():
     c.execute("create table drug_src(primaryid varchar, drug_seq varchar, dechal varchar, rechal varchar)")
     c.executemany("insert into drug_src values (?,?,?,?)", DRUG)
     c.execute("create table fct_signal_scores as " + render(GOLD / "fct_signal_scores.sql"))
-    c.execute("create table fct_signal_features as " + render(GOLD / "fct_signal_features.sql"))
+    for model in ("int_signal_latest_version", "int_signal_case", "int_signal_drug_flags",
+                  "int_signal_case_drug", "int_signal_case_reac", "fct_signal_features"):
+        c.execute(f"create table {model} as " + render(GOLD / f"{model}.sql"))
     c.execute("create table fct_signal_ranking_input as " + render(GOLD / "fct_signal_ranking_input.sql"))
     return c
 
