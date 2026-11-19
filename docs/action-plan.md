@@ -15,7 +15,7 @@
 | PR#73 | ✅ 머지 완료 (11/16) | B단계 실데이터 연결 + GOLD IC025 집계 v1 (이수연) |
 | PR#75 | ✅ 머지 완료 (11/19) | D단계 백테스트 하네스 — v1(IC025) 완료 + v2~v5 준비 (장수연) |
 | PR#78 | 🔍 리뷰 대기 | FAERS OUTC 적재 + D단계 v3~v5 랭킹 피처 모델 — 서버 실데이터 빌드·정합성 테스트 PASS (이지훈) |
-| `fix/ranking-logreg-crossfit` | 🔍 리뷰 대기 | #75 후속 — v3~v5 학습 결합 cross-fit 채점 버그 수정 + 배경 음성 옵션 (이지훈) |
+| PR#79 | 🔍 리뷰 대기 | #75 후속 — v3~v5 학습 결합 cross-fit 채점 버그 수정 + 배경 음성 옵션 (이지훈) |
 
 **이번 주 데드라인 (2026-11-17)** — D단계 v1 백테스트 결과 보고 후 v2~v5 진행 결정(B안)
 - [ ] 이수연 — D단계 v2(시점 PIT 리드타임) 진행
@@ -325,7 +325,7 @@ run 메타데이터 스키마:
 - [x] 세부2(장수연) — v1(IC025 단독) 백테스트 완료 + `IC025×log(a)` 랭킹 옵션 추가 (PR#75, 리뷰 대기)
 - [ ] 이수연 — v2 시점(PIT) 리드타임: 분기별 `as_of` 최초탐지 추출(`first_detection.csv`) — 11/17 착수
 - [x] 이지훈 — v3~v5 피처 집계(`death_frac`·`dechal_frac`·`rechal_frac`·`recency`) — PR#78. `fct_signal_features`·`fct_signal_ranking_input`, `assert_features_align_with_scores` PASS
-- [ ] ★ 이지훈 — v3~v5 학습 결합 버그 수정(`fix/ranking-logreg-crossfit`) — 라벨 점·라벨 없는 점을 다른 모델로 채점해 순위가 깨지던 것(v3 Lift 1122x 아티팩트) → cross-fit, 배경 음성 옵션
+- [ ] ★ 이지훈 — v3~v5 학습 결합 버그 수정(PR#79) — 라벨 점·라벨 없는 점을 다른 모델로 채점해 순위가 깨지던 것(v3 Lift 1122x 아티팩트) → cross-fit, 배경 음성 옵션
 - [ ] 함하경 — 부작용 사전(`reaction_dict_final.csv`) 확장, 실패 signal 137개 매핑 — 11/17 착수
 - [ ] 장수연 — 중간발표 기획 — 11/17 착수
 - [ ] 세부3 — dbt 마트·FastAPI·화면 2개
