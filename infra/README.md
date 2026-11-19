@@ -11,15 +11,17 @@
 | 리소스 | 이름 | 용도 |
 |---|---|---|
 | Budgets | `boaz-faers-projects` | 월 $15 예산 알림 |
-| IAM 정책 | `faers-team-s3` | S3 읽기 + `stage_b_silver`만 쓰기 (bronze는 읽기 전용) — [`policies/faers-team-s3.json`](policies/faers-team-s3.json) |
-| IAM 정책 | `faers-team-ec2` | 태그 `Project=faers-pipeline`이 붙은 인스턴스 시작/중지/SSM 접속 (`faers-work`·`faers-gpu`). 새 인스턴스는 이 태그만 붙이면 된다 — [`policies/faers-team-ec2.json`](policies/faers-team-ec2.json) |
+| IAM 정책 | `faers-team-s3` | 팀 버킷 전체 읽기·쓰기·삭제(`s3:*`). 단 **복구를 못 하게 만드는 작업만 Deny** — 이전 버전 영구 삭제, 버전 관리·수명 주기·버킷 정책 변경, 버킷 삭제 (2026-11-19 변경, 아래 참고) — [`policies/faers-team-s3.json`](policies/faers-team-s3.json) |
+| IAM 정책 | `faers-team-ec2` | 태그 `Project=faers-pipeline`이 붙은 인스턴스 시작/중지/SSM 접속 + `ssm:SendCommand`(`AWS-RunShellScript`, 2026-11-19 추가) (`faers-work`·`faers-gpu`). 새 인스턴스는 이 태그만 붙이면 된다 — [`policies/faers-team-ec2.json`](policies/faers-team-ec2.json) |
 | IAM 정책 | `faers-team-selfkeys` | 팀원이 **본인** 액세스 키만 만들고 지울 수 있음 (`${aws:username}`으로 본인 계정에 한정) — [`policies/faers-team-selfkeys.json`](policies/faers-team-selfkeys.json) |
 | IAM 그룹 | `faers-team` | 위 세 정책 연결, 팀원 사용자를 여기에 넣는다 |
 | IAM 역할 | `faers-ec2-role` | 서버가 쓰는 역할: `faers-team-s3` + `AmazonSSMManagedInstanceCore` |
 | EC2 | `faers-work` (`i-09ea3552c292bd78c`) | m5.xlarge(4코어/16GB), Amazon Linux 2023, gp3 30GiB |
 | CloudWatch 경보 | `faers-work-idle-stop` | CPU 평균 3% 미만이 2시간 이어지면 서버 자동 중지 |
 | Budgets | `faers-gpu` | 월 $50 (실제 50·80·100% 알림) — GPU 실험 예산 (2026-10-22 회의) |
-| IAM 정책 변경 | `faers-team-s3` | `iceberg_warehouse/stage_c_silver/stage3/*` 쓰기 추가 — 하네스 결과(part) 저장. 삭제 권한은 일부러 없음 |
+| IAM 정책 변경 | `faers-team-s3` | `iceberg_warehouse/stage_c_silver/stage3/*` 쓰기 추가 — 하네스 결과(part) 저장. 삭제 권한은 일부러 없음 (→ 2026-11-19 버킷 전체 `s3:*`로 대체) |
+| S3 버킷 설정 | 버전 관리 | **활성화**(2026-11-19). 지우거나 덮어써도 이전 버전이 남아 복구 가능 |
+| S3 수명 주기 규칙 | `noncurrent-30d` | 버킷 전체: 이전 버전 30일 후 영구 삭제, 만료된 삭제 마커 삭제, 불완전 멀티파트 업로드 7일 후 삭제. 현재 버전은 건드리지 않음 |
 | EC2 | `faers-gpu` (`i-08b3cf5ddb7dadc21`) | g6.xlarge(NVIDIA L4 24GB), Deep Learning OSS Nvidia Driver AMI(Ubuntu 26.04), gp3 100GiB, 역할 `faers-ec2-role`, 태그 `Project=faers-pipeline`, 인바운드 0개, 종료 방지·종료 동작 "중지". 아래 [GPU 서버](#gpu-서버-faers-gpu) |
 | 서비스 할당량 | G·VT 계열 | 온디맨드 8 vCPU / Spot 8 vCPU (2026-10-17 신청·승인) |
 
@@ -62,7 +64,12 @@
 - 키를 **채팅, 레포, `.env` 커밋에 넣지 않는다** (공개 레포). `aws configure`는 `~/.aws/credentials`에 저장하므로 레포와 무관하다.
 - 유출이 의심되면 IAM에서 그 키를 즉시 **비활성화**한다. 사용자당 키는 최대 2개.
 - 로컬에서 키로 S3를 대량으로 읽으면 전송비가 다시 생긴다. **무거운 작업은 서버에서** 하고 로컬은 접속용으로만 쓴다.
-- `ssm:SendCommand`(터미널 없이 서버에 명령 전송)는 필요할 때 범위를 서버 1대로 좁혀 추가한다. 지금은 열지 않았다.
+- `ssm:SendCommand`(터미널 없이 서버에 명령 전송)는 2026-11-19 열었다 — `Project=faers-pipeline` 태그 서버(`faers-work`·`faers-gpu`)에 `AWS-RunShellScript`만. Claude 등 에이전트가 사람 복붙 없이 서버에서 실행하기 위함.
+  - **root로 실행된다.** 홈 폴더에 root 소유 파일이 생기지 않게 `sudo -u ssm-user bash -lc '…'`로 감싸서 보낸다.
+  - 확인: `aws ssm send-command --instance-ids i-09ea3552c292bd78c --document-name AWS-RunShellScript --parameters 'commands=["sudo -u ssm-user bash -lc whoami"]'` → `aws ssm get-command-invocation --instance-id i-09ea3552c292bd78c --command-id <ID>` 출력이 `ssm-user`
+  - 서버 메모리(16GB)를 같이 쓰므로 큰 집계는 단톡에 알리고 돌린다.
+- S3는 2026-11-19부터 버킷 전체 쓰기·삭제를 열었다. 대신 **버전 관리 + 수명 주기(이전 버전 30일)** 로 실수해도 30일 안에는 복구할 수 있게 했고, 그 안전장치를 끄거나 우회하는 작업(이전 버전 영구 삭제·버전 관리/수명 주기 변경)은 정책에서 Deny했다. 복구: S3 콘솔 → 객체 → "버전 표시" 켜고 이전 버전 다운로드/복사, 또는 삭제 마커 삭제.
+  - Deny는 `faers-team` 그룹 전원(관리자 본인 포함, 그룹 소속이면)에게 걸린다. 버전 관리·수명 주기를 바꿔야 하면 Deny 블록을 잠깐 빼고 작업 후 되돌린다.
 
 ## 서버 최초 세팅
 
