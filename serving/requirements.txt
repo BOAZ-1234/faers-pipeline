@@ -1,0 +1,5 @@
+duckdb>=1.5
+fastapi>=0.118
+uvicorn[standard]>=0.37
+# S3 소스 사용 시 (httpfs 자격증명은 AWS 기본 체인 사용)
+boto3>=1.34
