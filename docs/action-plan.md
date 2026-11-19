@@ -4,7 +4,7 @@
 
 ---
 
-**현재 진행 상황 (2026-11-17 기준)**
+**현재 진행 상황 (2026-11-19 기준)**
 
 | PR | 상태 | 내용 |
 |---|---|---|
@@ -13,13 +13,24 @@
 | PR#67 | ✅ 머지 완료 | GPU pilot benchmark.py + stage3_judge_hakyung.txt (함하경) |
 | PR#69 | ✅ 머지 완료 | GPU 서버 세팅 (이지훈) |
 | PR#73 | ✅ 머지 완료 (11/16) | B단계 실데이터 연결 + GOLD IC025 집계 v1 (이수연) |
-| PR#75 | 🔍 리뷰 대기 | D단계 백테스트 하네스 — v1(IC025) 완료 + v2~v5 준비 (장수연) |
+| PR#75 | ✅ 머지 완료 (11/19) | D단계 백테스트 하네스 — v1(IC025) 완료 + v2~v5 준비 (장수연) |
+| PR#78 | 🔍 리뷰 대기 | FAERS OUTC 적재 + D단계 v3~v5 랭킹 피처 모델 — 서버 실데이터 빌드·정합성 테스트 PASS (이지훈) |
+| PR#79 | 🔍 리뷰 대기 | #75 후속 — v3~v5 학습 결합 cross-fit 채점 버그 수정 + 배경 음성 옵션 (이지훈) |
 
 **이번 주 데드라인 (2026-11-17)** — D단계 v1 백테스트 결과 보고 후 v2~v5 진행 결정(B안)
 - [ ] 이수연 — D단계 v2(시점 PIT 리드타임) 진행
-- [ ] 이지훈 — D단계 v3~v5 피처 집계(death_frac·dechal_frac·rechal_frac·recency) 진행
+- [x] 이지훈 — D단계 v3~v5 피처 집계(death_frac·dechal_frac·rechal_frac·recency) — PR#78, faers-work 실데이터 빌드 완료(3,805,363쌍, 결측 0)
 - [ ] 함하경 — 부작용 사전(`reaction_dict_final.csv`) 확장 — 실패 signal 137개 매핑
 - [ ] 장수연 — 중간발표 기획
+
+**11/19 추가 요청** — v3~v5 실데이터 백테스트(1차, 반응 사전 없이)에서 새로 드러난 것. ★ = 기존 계획에 없던 항목
+- [ ] ★ 이수연 — `fct_signal_scores` 서버(faers-work 16GB) OOM 수정. `latest_rows`가 617M행을 `f.*`(전체 컬럼)로 끌고 감 → 필요한 컬럼만 쓰거나 `int_signal_*` 중간 표 재사용. 지금은 Release `fct-signal-scores-v1-2026-11-16` parquet로 우회 중(피처와 키·a 일치 확인). v2 as_of 스냅샷도 같은 집계라 같은 문제 예상
+- [ ] ★ 함하경 — 확장한 `reaction_dict_final.csv`를 Release(또는 서버 `~/jihun/dict/`)에 공유. gitignore라 레포에 없어서 지금 채점가능 양성이 245/493(커버리지 49.7%)
+- [ ] ★ 이지훈 — 사전 들어오면 v1~v5 재측정 → 수정 PR 결과표 갱신
+- [ ] ★ 팀 결정 — ① v3~v5 배경 음성 기본값(`--bg-neg-ratio 3`?) ② 최종 랭킹 v1e vs v5. 사전 반영 재측정 후 결정
+- [ ] ★ 담당 미정 — Drugs@FDA 시점 라벨 수집(아래 2장) — v2~v5 라벨 필터(`label_excludes`) 입력. 없으면 필터 미적용(경고만)
+
+1차 결과(잠정, 게이트 후 후보 832,760, 채점가능 양성 245): Recall@100k — v1 22.9% · v1e 31.0% · v5 + 배경 음성×3 **35.5%**(Lift 3.0x). 배경 음성 없이 학습하면 v3 Lift@100k 0.6x(무작위 이하) — "양성 vs FDA 검토 음성"만으로는 신호 vs 배경을 못 배움
 
 ---
 
@@ -141,7 +152,8 @@
 - [x] 2015~2026년치 백필 파이프라인 → Iceberg (2026-08-28 완료)
 - [x] ★ 2004~2014년치 백필 검증 완료 (PR#33)
 - [x] 고유 약물명 추출 코드 작성 (PR#10 머지 완료)
-- [ ] Drugs@FDA 시점 라벨 수집 — 게이트엔 불포함(D단계 필터용)
+- [ ] Drugs@FDA 시점 라벨 수집 — 게이트엔 불포함(D단계 필터용) — ★ 담당 미정(11/19 추가 요청 참고)
+- [x] ★ FAERS OUTC(결과 코드) 적재 — `stage_a_raw.faers_outc`, 55분기(2012Q4~2026Q2) 15,178,513행, 원본 zip과 분기별 일치 (이지훈, PR#78)
 - [x] A리드(이지훈) — 파티션·멱등성 설계 완료 (PR#22/#24)
 - [x] `faers_demo/drug/reac`에 `source_zip` 컬럼 추가 (PR#33)
 - [ ] faers `load_manifest` 소급 기록 — 백필분(2013Q3·2013Q4 REAC) 외 기존 분기는 기록 없음. 그 전까지 `load_faers_master.py`를 전체 zip 폴더 대상으로 재실행 금지(DRUG/REAC 중복 append됨)
@@ -312,7 +324,8 @@ run 메타데이터 스키마:
 - [x] 세부2(장수연) — 정답지 1,715쌍 분할 + 2023년 컷오프 (PR#15)
 - [x] 세부2(장수연) — v1(IC025 단독) 백테스트 완료 + `IC025×log(a)` 랭킹 옵션 추가 (PR#75, 리뷰 대기)
 - [ ] 이수연 — v2 시점(PIT) 리드타임: 분기별 `as_of` 최초탐지 추출(`first_detection.csv`) — 11/17 착수
-- [ ] 이지훈 — v3~v5 피처 집계(`death_frac`·`dechal_frac`·`rechal_frac`·`recency`) — 11/17 착수
+- [x] 이지훈 — v3~v5 피처 집계(`death_frac`·`dechal_frac`·`rechal_frac`·`recency`) — PR#78. `fct_signal_features`·`fct_signal_ranking_input`, `assert_features_align_with_scores` PASS
+- [ ] ★ 이지훈 — v3~v5 학습 결합 버그 수정(PR#79) — 라벨 점·라벨 없는 점을 다른 모델로 채점해 순위가 깨지던 것(v3 Lift 1122x 아티팩트) → cross-fit, 배경 음성 옵션
 - [ ] 함하경 — 부작용 사전(`reaction_dict_final.csv`) 확장, 실패 signal 137개 매핑 — 11/17 착수
 - [ ] 장수연 — 중간발표 기획 — 11/17 착수
 - [ ] 세부3 — dbt 마트·FastAPI·화면 2개
