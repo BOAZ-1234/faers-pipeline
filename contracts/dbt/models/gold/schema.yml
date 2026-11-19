@@ -76,3 +76,66 @@ models:
         data_type: integer
         constraints:
           - type: not_null
+
+  - name: fct_signal_features
+    description: >
+      D단계 v3~v5 랭킹 피처. 성분×부작용 1개당 1행, fct_signal_scores와 같은 키·같은 신고 집단
+      (최신판·PS/SS·성분 분해·고유 caseid — a가 같아야 함, assert_features_align_with_scores).
+      비율 피처의 분모는 a.
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: ingredient
+        data_type: varchar
+        constraints:
+          - type: not_null
+      - name: pt
+        data_type: varchar
+        constraints:
+          - type: not_null
+      - name: a
+        description: "동시출현 고유 caseid 수 — fct_signal_scores.a와 같아야 한다(피처 분모)."
+        data_type: integer
+        constraints:
+          - type: not_null
+      - name: death_frac
+        description: "(v3) OUTC에 DE(사망)가 있는 신고 비율. 결과 행이 없는 신고는 0."
+        data_type: double
+        constraints:
+          - type: not_null
+      - name: serious_frac
+        description: "(참고) DE·LT·HO·DS·CA·RI 중 하나라도 있는 신고 비율(OT 제외)."
+        data_type: double
+        constraints:
+          - type: not_null
+      - name: dechal_frac
+        description: "(v4) 이 성분 PS/SS 약물 행에 dechal='Y'(중단 후 호전)가 있는 신고 비율. 빈 값은 Y가 아님으로 셈."
+        data_type: double
+        constraints:
+          - type: not_null
+      - name: rechal_frac
+        description: "(v4) 같은 조건으로 rechal='Y'(재투여 후 재발) 비율."
+        data_type: double
+        constraints:
+          - type: not_null
+      - name: dechal_known_n
+        description: "dechal이 Y/N으로 채워진 신고 수(0~a) — 채움률 분석용."
+        data_type: integer
+        constraints:
+          - type: not_null
+      - name: rechal_known_n
+        description: "rechal이 Y/N으로 채워진 신고 수(0~a)."
+        data_type: integer
+        constraints:
+          - type: not_null
+      - name: recency
+        description: "(v5) 데이터 마지막 접수일(fda_dt 최댓값) 기준 최근 2년 안에 접수된 신고 비율. 기준일이 데이터에서 나와 재실행해도 같다."
+        data_type: double
+        constraints:
+          - type: not_null
+
+  - name: fct_signal_ranking_input
+    description: >
+      D단계 백테스트 입력(--signals). fct_signal_scores 전체 열 + v3~v5 피처(death_frac·dechal_frac·
+      rechal_frac·recency 등). fct_signal_scores를 고치지 않고 별도 모델로 합친다.
