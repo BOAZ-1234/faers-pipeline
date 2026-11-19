@@ -22,6 +22,16 @@
                 "cloudwatch:DescribeAlarms",
                 "ssm:DescribeInstanceInformation", "ssm:DescribeInstanceProperties",
                 "ssm:GetConnectionStatus", "ssm:DescribeSessions"],
+     "Resource": "*"},
+    {"Effect": "Allow",
+     "Action": "ssm:SendCommand",
+     "Resource": "arn:aws:ec2:ap-northeast-2:825494477740:instance/*",
+     "Condition": {"StringEquals": {"ssm:resourceTag/Project": "faers-pipeline"}}},
+    {"Effect": "Allow",
+     "Action": "ssm:SendCommand",
+     "Resource": "arn:aws:ssm:ap-northeast-2::document/AWS-RunShellScript"},
+    {"Effect": "Allow",
+     "Action": ["ssm:GetCommandInvocation", "ssm:ListCommandInvocations", "ssm:ListCommands", "ssm:CancelCommand"],
      "Resource": "*"}
   ]
 }
