@@ -101,14 +101,38 @@ def test_v2_warns_when_no_excludes():
 
 
 # ── v3~v5: 학습 결합 ────────────────────────────────────────────────────────
+def _separable_signals(n_pos=30, n_neg=30, n_unl=300, seed=0):
+    """양성은 death_frac 등이 높고 음성은 낮게, ic025 는 전원 같은 분포(못 가름).
+
+    겹마다 수십~수백 점이 들어가는 크기라야 겹 안 백분위가 의미를 갖는다. 12행짜리
+    `_signals()` 는 겹당 4점이라 백분위가 0.25 단위로 뭉개져, 행 순서에 따라 통과/실패가
+    갈렸다(이전 구현도 무작위 행 순서 20회 중 16회 실패 — 리뷰 #79 대응 중 확인).
+    """
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    rows = []
+    for kind, n, hi in (("pos", n_pos, True), ("neg", n_neg, False), ("unl", n_unl, None)):
+        for i in range(n):
+            if hi is None:
+                f = rng.uniform(0.1, 0.6, 4)
+            else:
+                f = rng.uniform(0.75, 0.95, 4) if hi else rng.uniform(0.0, 0.08, 4)
+            rows.append(dict(ingredient=f"{kind}drug{i}", pt=f"{kind}reac{i}",
+                             ic025=rng.normal(1.0, 0.5), a=int(rng.integers(3, 50)),
+                             death_frac=f[0], dechal_frac=f[1], rechal_frac=f[2], recency=f[3]))
+    sig = pd.DataFrame(rows)
+    pos = {make_key(f"posdrug{i}", f"posreac{i}") for i in range(n_pos)}
+    neg = {make_key(f"negdrug{i}", f"negreac{i}") for i in range(n_neg)}
+    return sig, pos, neg
+
+
 @pytest.mark.parametrize("version", ["v3", "v4", "v5"])
 def test_learned_versions_rank_positives_above_negatives(version):
-    sig = _signals()
-    positives, negatives = _labels()
+    sig, positives, negatives = _separable_signals()
     rr = build_ranking(sig, version, positives=positives, negatives=negatives)
     pos_ranks = [rr.ranking.index(k) for k in positives]
     neg_ranks = [rr.ranking.index(k) for k in negatives]
-    # death_frac 등 피처가 양성에서 높으므로 평균 순위가 음성보다 앞(작음)이어야
+    # death_frac 등 피처가 양성에서 높으므로 양성 전부가 음성 전부보다 앞(작음)이어야
     assert max(pos_ranks) < min(neg_ranks)
     assert rr.meta["combiner"] == "logreg"
     assert set(rr.meta["coef"]) == set(VERSIONS[version].features)
@@ -243,3 +267,30 @@ def test_bg_neg_ratio_learns_signal_vs_background():
     assert rr.meta["coef"]["death_frac"] > 0
     pos_ranks = sorted(rr.ranking.index(k) for k in pos)
     assert pos_ranks[len(pos_ranks) // 2] < len(rr.ranking) // 4   # 양성 중앙값이 상위 25% 안
+
+
+# ── v3~v5: 입력 행 순서와 무관 (리뷰 #79) ──────────────────────────────────────
+@pytest.mark.parametrize("version,bg", [("v3", 0.0), ("v3", 3.0), ("v5", 3.0)])
+def test_learned_ranking_invariant_to_row_order(version, bg):
+    """같은 데이터를 다른 행 순서로 넘겨도 순위·계수가 같아야 한다.
+
+    겹 배정·배경 음성 선택이 행 위치에 기대면, parquet 을 다시 저장/로드(ORDER BY 없음)
+    하는 것만으로 Recall@K 가 바뀐다.
+    """
+    sig, pos, neg = _noise_signals(n_pos=40, n_neg=20, n_unl=1000)
+    sig.loc[sig["ingredient"].str.startswith("p"), "death_frac"] += 0.3
+    a = build_ranking(sig, version, positives=pos, negatives=neg, bg_neg_ratio=bg)
+    for seed in (1, 2):
+        shuffled = sig.sample(frac=1, random_state=seed)
+        b = build_ranking(shuffled, version, positives=pos, negatives=neg, bg_neg_ratio=bg)
+        assert b.ranking == a.ranking
+        assert b.meta["coef"] == pytest.approx(a.meta["coef"])
+
+
+def test_bg_neg_picks_are_unique_near_full_unlabeled():
+    """배경 음성 수가 라벨 없는 후보 수에 가까워도 중복 없이 요청한 만큼 뽑힌다."""
+    sig, pos, neg = _noise_signals(n_pos=20, n_neg=10, n_unl=300)
+    rr = build_ranking(sig, "v3", positives=pos, negatives=neg, bg_neg_ratio=14.9)
+    assert rr.meta["n_bg_neg_train"] == 298   # round(20 × 14.9)
+    rr = build_ranking(sig, "v3", positives=pos, negatives=neg, bg_neg_ratio=100.0)
+    assert rr.meta["n_bg_neg_train"] == 300   # 라벨 없는 후보 전부(상한)

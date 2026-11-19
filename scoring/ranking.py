@@ -39,6 +39,7 @@ v1e(증거량 가중, 헤드라인 재현용):
 
 from __future__ import annotations
 
+import hashlib
 import warnings
 from dataclasses import dataclass, field
 from typing import Iterable, Sequence
@@ -298,6 +299,21 @@ def build_ranking(
                          version=version, meta=meta)
 
 
+def _key_hash_order(keys: Sequence[SignalKey]) -> np.ndarray:
+    """(ingredient, reaction) 해시 오름차순 인덱스 — 입력 행 순서와 무관한 결정적 순서.
+
+    blake2b(8바이트)는 파이썬 hash() 와 달리 실행·프로세스마다 바뀌지 않는다.
+    해시가 같은(사실상 없음) 경우는 키 문자열로 한 번 더 정렬한다.
+    """
+    strs = [f"{k.ingredient}\x1f{k.reaction}" for k in keys]
+    h = np.fromiter(
+        (int.from_bytes(hashlib.blake2b(s.encode("utf-8"), digest_size=8).digest(), "big")
+         for s in strs),
+        dtype=np.uint64, count=len(strs),
+    )
+    return np.lexsort((np.array(strs, dtype=object), h))
+
+
 def _logreg_scores(
     df: pd.DataFrame,
     keys: list[SignalKey],
@@ -311,7 +327,9 @@ def _logreg_scores(
 ) -> tuple[np.ndarray, dict]:
     """학습 결합 점수 — 모든 후보를 cross-fit 으로 채점(in-sample 누수 + 채점 모델 불일치 방지).
 
-    · 후보 전부(라벨 양성·음성·라벨 없음)를 k 겹으로 나눈다. 라벨은 층화, 라벨 없음은 등장 순서.
+    · 후보 전부(라벨 양성·음성·라벨 없음)를 k 겹으로 나눈다. 순서는 (ingredient, pt) 해시 순서
+      — 입력 행 순서와 무관(같은 데이터를 다른 순서로 저장·로드해도 같은 결과). 양성·음성은
+      해시 순서로 돌아가며 배정(층화)해 모든 학습 겹에 두 클래스가 다 들어간다.
     · 겹 f 의 후보는 **겹 f 를 뺀 라벨로 학습한 같은 모델 하나**가 채점한다
       → 채점에 쓰는 양성을 그 양성으로 학습한 모델이 매기지 않고(OOF),
         라벨 있는 점과 없는 점이 **같은 모델**에서 점수를 받는다.
@@ -323,7 +341,7 @@ def _logreg_scores(
     점수가 라벨 없는 점의 점수 범위(0.651~0.757)를 벗어났고(겹1 OOF 0.593~0.806), 라벨 332개가
     0~54위와 맨 끝에 덩어리로 몰렸다 — 2026-11-19 faers-work 진단.)
 
-    bg_neg_ratio > 0 이면 라벨 없는 후보 중 양성 수 × ratio 개를 등간격으로 골라
+    bg_neg_ratio > 0 이면 라벨 없는 후보 중 양성 수 × ratio 개를 해시 순서 앞에서부터(중복 없음) 골라
     **배경 음성**(y=0)으로 학습에 추가한다(PU 방식). 기본 음성(FDA 검토 후 미조치)은
     그 자체가 강신호라 "신호 vs 배경"을 못 배우는 문제를 보완한다. 기본값 0 = 기존 라벨만.
 
@@ -342,20 +360,24 @@ def _logreg_scores(
         elif k in neg:
             y[i] = 0.0
     labeled = ~np.isnan(y)
-    pos_idx = np.where(y == 1.0)[0]
-    neg_idx = np.where(y == 0.0)[0]
-    n_pos, n_neg = len(pos_idx), len(neg_idx)
+    n_pos = int((y == 1.0).sum())
+    n_neg = int((y == 0.0).sum())
 
-    # 배경 음성(선택): 라벨 없는 후보에서 등간격(결정적)으로 뽑아 y=0 학습 행으로 추가
+    # 행 순서와 무관한 결정적 순서: (ingredient, pt) 해시. 배경 음성 선택·겹 배정 모두 이 순서로.
+    order = _key_hash_order(keys)
+
+    # 배경 음성(선택): 라벨 없는 후보를 해시 순서 앞에서부터 골라 y=0 학습 행으로 추가(중복 없음)
     n_bg = 0
     if bg_neg_ratio > 0 and n_pos > 0:
-        unl_idx = np.where(~labeled)[0]
-        n_bg = min(int(round(n_pos * bg_neg_ratio)), len(unl_idx))
-        if n_bg > 0:
-            pick = unl_idx[np.linspace(0, len(unl_idx) - 1, n_bg).round().astype(int)]
-            y[pick] = 0.0
+        unl_sorted = order[~labeled[order]]
+        n_req = min(int(round(n_pos * bg_neg_ratio)), len(unl_sorted))
+        if n_req > 0:
+            y[unl_sorted[:n_req]] = 0.0
             labeled = ~np.isnan(y)
-            neg_idx = np.where(y == 0.0)[0]
+            n_bg = int((y == 0.0).sum()) - n_neg   # 실제 추가된 수
+
+    pos_idx = order[y[order] == 1.0]   # 해시 순서
+    neg_idx = order[y[order] == 0.0]   # 해시 순서(배경 음성 포함)
 
     if n_pos < 2 or len(neg_idx) < 2:
         warnings.warn(
@@ -371,14 +393,14 @@ def _logreg_scores(
     # 전체 학습셋 모델: 계수 보고용(+ 학습 겹에 한 클래스가 없을 때만 대체 채점)
     full = fit_shrinkage_logreg(X[labeled], y[labeled], spec.features, l2=l2)
 
-    # cross-fit 겹 배정 (결정적, 난수 없음): 양성·음성은 층화, 라벨 없음은 등장 순서로
+    # cross-fit 겹 배정 (결정적·행 순서 무관): 양성·음성·라벨 없음 각각 해시 순서로 돌아가며.
+    # k ≤ min(양성, 음성) 이고 양·음성을 층화하므로 모든 겹에 양·음성이 1개 이상 → 모든
+    # 학습 겹(= 나머지 k-1 겹)에 두 클래스가 다 있다. 아래 fallback 은 방어용.
     k = max(2, min(n_folds, n_pos, len(neg_idx)))
     fold = np.full(len(keys), -1, dtype=int)
-    for j, idx in enumerate(pos_idx):
-        fold[idx] = j % k
-    for j, idx in enumerate(neg_idx):
-        fold[idx] = j % k
-    unl = np.where(~labeled)[0]
+    fold[pos_idx] = np.arange(len(pos_idx)) % k
+    fold[neg_idx] = np.arange(len(neg_idx)) % k
+    unl = order[~labeled[order]]
     fold[unl] = np.arange(len(unl)) % k
 
     scores = np.zeros(len(keys), dtype=float)
@@ -389,12 +411,21 @@ def _logreg_scores(
         train = labeled & (fold != f)
         ytr = y[train]
         if (ytr == 1).sum() < 1 or (ytr == 0).sum() < 1:
-            m = full  # 학습 겹에 한 클래스가 없음(드묾) — 이 겹의 라벨 점은 OOF 아님
+            # 층화 배정상 도달하지 않음. 그래도 생기면 전체 모델로 채점 — 이 겹의 라벨 점은
+            # 자기 자신을 학습한 모델로 채점되므로(in-sample 누수) 경고하고 OOF 집계에서 뺀다.
+            m = full
             folds_fallback += 1
+            warnings.warn(
+                f"{spec.name}: 겹 {f} 의 학습셋에 한 클래스가 없어 전체 모델로 채점 — "
+                f"이 겹의 라벨 {int((test & labeled).sum())}개는 in-sample(누수) 점수다.",
+                stacklevel=2,
+            )
         else:
             m = fit_shrinkage_logreg(X[train], ytr, spec.features, l2=l2)
             oof_scored += int((test & labeled).sum())
-        # 겹 안 백분위 — 겹 모델 간 절편·스케일 차이 제거
+        # 겹 안 백분위 — 겹 모델 간 절편·스케일 차이 제거. 원본 확률을 겹끼리 섞어 정렬하면
+        # 계수 흔들림이 순위로 샌다(위 docstring). 대가: 겹 크기가 비슷하면 같은 겹 내 등수끼리
+        # 동점(묶음 ≤ k개) → ic025 보조키로 정렬. 83만 후보·5겹 실측: 묶음 최대 5, 이동 ≤ 4칸.
         scores[test] = pd.Series(m.predict_proba(X[test])).rank(method="average", pct=True).to_numpy()
 
     return scores, {
