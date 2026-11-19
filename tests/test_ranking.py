@@ -179,3 +179,67 @@ def test_learned_versions_use_oof_scoring():
     assert rr.meta["combiner"] == "logreg"
     assert rr.meta["oof_folds"] >= 2
     assert rr.meta["oof_scored"] == 6
+
+
+# ── v3~v5: cross-fit 채점 — 라벨 점과 라벨 없는 점을 같은 모델로 ───────────────
+def _noise_signals(n_pos=20, n_neg=10, n_unl=300, seed=0):
+    """피처가 라벨과 무관한(정보 없는) 순위표 — 실데이터 v3 스모크(계수≈0) 재현용."""
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    n = n_pos + n_neg + n_unl
+    names = ([f"p{i}" for i in range(n_pos)] + [f"n{i}" for i in range(n_neg)]
+             + [f"u{i}" for i in range(n_unl)])
+    sig = pd.DataFrame(dict(
+        ingredient=names, pt=[f"r_{x}" for x in names],
+        ic025=rng.normal(1.0, 0.5, n), a=rng.integers(3, 50, n),
+        death_frac=rng.uniform(0, 1, n), dechal_frac=rng.uniform(0, 1, n),
+        rechal_frac=rng.uniform(0, 1, n), recency=rng.uniform(0, 1, n),
+    ))
+    pos = {make_key(f"p{i}", f"r_p{i}") for i in range(n_pos)}
+    neg = {make_key(f"n{i}", f"r_n{i}") for i in range(n_neg)}
+    return sig, pos, neg
+
+
+@pytest.mark.parametrize("version", ["v3", "v4", "v5"])
+def test_labeled_keys_not_clustered_when_features_uninformative(version):
+    """피처 정보가 없으면 라벨 점은 순위 전체에 흩어져야 한다(라벨 여부가 순위에 새지 않음).
+
+    실데이터 v3 스모크에서 라벨 332개가 0~54위와 맨 끝에 몰린 현상의 성질 검사.
+    합성 데이터로는 이전 구현에서도 재현되지 않아, 회귀 재현이 아니라 불변식 검사다.
+    """
+    sig, pos, neg = _noise_signals()
+    rr = build_ranking(sig, version, positives=pos, negatives=neg)
+    labeled = pos | neg
+    n_lab = len(labeled)
+    top = rr.ranking[:n_lab]
+    bottom = rr.ranking[-n_lab:]
+    # 무작위라면 상위/하위 n_lab 안의 라벨 기대값 ≈ n_lab²/N ≈ 2.7개
+    assert sum(k in labeled for k in top) < n_lab // 2
+    assert sum(k in labeled for k in bottom) < n_lab // 2
+
+
+def test_crossfit_scores_every_candidate_out_of_fold():
+    sig = _signals()
+    positives, negatives = _labels()
+    rr = build_ranking(sig, "v3", positives=positives, negatives=negatives)
+    assert rr.meta["scoring"] == "crossfit_fold_percentile"
+    assert rr.meta["folds_fallback"] == 0
+    assert rr.meta["n_bg_neg_train"] == 0
+
+
+def test_bg_neg_ratio_adds_background_negatives():
+    sig, pos, neg = _noise_signals()
+    rr = build_ranking(sig, "v3", positives=pos, negatives=neg, bg_neg_ratio=2.0)
+    assert rr.meta["n_bg_neg_train"] == 40   # 양성 20 × 2
+    assert rr.meta["n_neg_train"] == 10      # 원래 음성 수는 그대로 보고
+
+
+def test_bg_neg_ratio_learns_signal_vs_background():
+    """배경 음성을 넣으면, 양성이 배경보다 death_frac 이 높을 때 그걸 배운다."""
+    sig, pos, neg = _noise_signals()
+    is_pos = sig["ingredient"].str.startswith("p")
+    sig.loc[is_pos, "death_frac"] = 0.95
+    rr = build_ranking(sig, "v3", positives=pos, negatives=neg, bg_neg_ratio=3.0)
+    assert rr.meta["coef"]["death_frac"] > 0
+    pos_ranks = sorted(rr.ranking.index(k) for k in pos)
+    assert pos_ranks[len(pos_ranks) // 2] < len(rr.ranking) // 4   # 양성 중앙값이 상위 25% 안

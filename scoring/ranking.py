@@ -25,9 +25,10 @@ v1e(증거량 가중, 헤드라인 재현용):
 
 누수 방지 (학습 결합 v3~v5):
   로지스틱 회귀는 정답지(positives/negatives)로 학습하므로, 학습에 쓴 양성을 그대로
-  채점하면 성능이 과대평가된다(in-sample). 그래서 **라벨된 점은 OOF(out-of-fold)로
-  채점**한다 — 각 양성/음성은 자기를 학습에 쓰지 않은 모델이 매긴 점수만 받는다.
-  라벨 없는 후보는 전량 학습 모델로 점수를 매긴다(이쪽은 정답이 없어 누수 없음).
+  채점하면 성능이 과대평가된다(in-sample). 그래서 **후보 전체를 cross-fit 으로 채점**한다
+  — 후보를 k 겹으로 나눠, 각 겹은 그 겹을 뺀 라벨로 학습한 모델 하나가 라벨 유무와
+  상관없이 전부 채점하고, 겹 안 백분위로 바꿔 합친다. 라벨 점과 라벨 없는 점을 서로
+  다른 모델로 채점하면 겹별 절편 차이가 순위로 새므로(2026-11-19 실데이터 확인) 피한다.
 
 데이터 가용성(2026-11 기준):
   · v1/v1e/v2 — `fct_signal_scores`의 `ic025`·`a`만 있으면 됨 → **지금 실행 가능**.
@@ -214,6 +215,7 @@ def build_ranking(
     label_excludes: Iterable[SignalKey] | None = None,
     gate: Gate | None = None,
     l2: float = 1.0,
+    bg_neg_ratio: float = 0.0,
 ) -> RankingResult:
     """signals(fct_signal_scores) → 정렬된 순위표.
 
@@ -222,6 +224,7 @@ def build_ranking(
     label_excludes : 시점(T) 이전에 이미 라벨에 있던 (성분,반응) 키 — v2+ 이진 제거.
                      None 이면 필터는 '통과'(경고). 실제 집합은 상류 Drugs@FDA 시점 라벨.
     gate           : 고정 게이트. None 이면 미적용(v1 '전수 완주'). 표준은 Gate.standard().
+    bg_neg_ratio   : v3+ 학습에 배경 음성(라벨 없는 후보)을 양성 수 × ratio 개 추가. 0 = 안 씀.
     """
     if version not in VERSIONS:
         raise KeyError(f"알 수 없는 버전 {version!r} (가능: {list(VERSIONS)})")
@@ -282,7 +285,8 @@ def build_ranking(
         meta["combiner"] = "ic025_log_a"
     else:
         scores, cmeta = _logreg_scores(
-            df, keys, feature_cols, spec, positives, negatives, l2
+            df, keys, feature_cols, spec, positives, negatives, l2,
+            bg_neg_ratio=bg_neg_ratio,
         )
         meta.update(cmeta)
 
@@ -303,14 +307,27 @@ def _logreg_scores(
     negatives: Iterable[SignalKey] | None,
     l2: float,
     n_folds: int = 5,
+    bg_neg_ratio: float = 0.0,
 ) -> tuple[np.ndarray, dict]:
-    """학습 결합 점수 — 라벨된 점은 OOF로 채점(in-sample 누수 방지).
+    """학습 결합 점수 — 모든 후보를 cross-fit 으로 채점(in-sample 누수 + 채점 모델 불일치 방지).
 
-    · 라벨 없는 후보  : 전량 학습 모델(모든 라벨로 적합)로 점수 — 정답이 없어 누수 없음.
-    · 라벨된 양성/음성: 층화 k-겹으로 나눠, 자기가 속한 겹을 뺀 모델로만 점수(OOF).
-                        → 채점에 쓰는 양성을 그 양성으로 학습한 모델이 매기지 않는다.
+    · 후보 전부(라벨 양성·음성·라벨 없음)를 k 겹으로 나눈다. 라벨은 층화, 라벨 없음은 등장 순서.
+    · 겹 f 의 후보는 **겹 f 를 뺀 라벨로 학습한 같은 모델 하나**가 채점한다
+      → 채점에 쓰는 양성을 그 양성으로 학습한 모델이 매기지 않고(OOF),
+        라벨 있는 점과 없는 점이 **같은 모델**에서 점수를 받는다.
+    · 겹마다 점수를 그 겹 안의 백분위로 바꾼다 — 겹 모델마다 절편이 조금씩 달라도
+      겹 간 점수 수준 차이가 순위에 새지 않는다.
+
+    (이전 구현은 라벨 점=겹 모델, 라벨 없는 점=전체 모델로 채점했다. 피처 정보가 약하면
+    겹별 절편 차이가 순위를 결정해, 실데이터 v3에서 라벨 332개가 0~54위와 맨 끝에
+    덩어리로 몰렸다 — 2026-11-19 faers-work 스모크.)
+
+    bg_neg_ratio > 0 이면 라벨 없는 후보 중 양성 수 × ratio 개를 등간격으로 골라
+    **배경 음성**(y=0)으로 학습에 추가한다(PU 방식). 기본 음성(FDA 검토 후 미조치)은
+    그 자체가 강신호라 "신호 vs 배경"을 못 배우는 문제를 보완한다. 기본값 0 = 기존 라벨만.
+
     라벨 부족(양/음성 < 2) 시 ic025 정렬로 fallback.
-    계수 보고(coef)는 전체 라벨로 적합한 모델 기준(해석용, 채점과 분리).
+    계수 보고(coef)는 전체 학습셋으로 적합한 모델 기준(해석용, 채점과 분리).
     """
     pos = set(positives or ())
     neg = set(negatives or ())
@@ -328,10 +345,21 @@ def _logreg_scores(
     neg_idx = np.where(y == 0.0)[0]
     n_pos, n_neg = len(pos_idx), len(neg_idx)
 
-    if n_pos < 2 or n_neg < 2:
+    # 배경 음성(선택): 라벨 없는 후보에서 등간격(결정적)으로 뽑아 y=0 학습 행으로 추가
+    n_bg = 0
+    if bg_neg_ratio > 0 and n_pos > 0:
+        unl_idx = np.where(~labeled)[0]
+        n_bg = min(int(round(n_pos * bg_neg_ratio)), len(unl_idx))
+        if n_bg > 0:
+            pick = unl_idx[np.linspace(0, len(unl_idx) - 1, n_bg).round().astype(int)]
+            y[pick] = 0.0
+            labeled = ~np.isnan(y)
+            neg_idx = np.where(y == 0.0)[0]
+
+    if n_pos < 2 or len(neg_idx) < 2:
         warnings.warn(
             f"{spec.name}: 후보 안에 학습 가능한 라벨이 부족하다 "
-            f"(양성 {n_pos}, 음성 {n_neg}) → ic025 정렬로 fallback.",
+            f"(양성 {n_pos}, 음성 {n_neg}, 배경 음성 {n_bg}) → ic025 정렬로 fallback.",
             stacklevel=2,
         )
         return df[IC025_COL].to_numpy(dtype=float), {
@@ -339,32 +367,39 @@ def _logreg_scores(
             "n_pos_train": n_pos, "n_neg_train": n_neg,
         }
 
-    # 전체 라벨 모델: 라벨 없는 후보 채점 + 계수 보고용
+    # 전체 학습셋 모델: 계수 보고용(+ 학습 겹에 한 클래스가 없을 때만 대체 채점)
     full = fit_shrinkage_logreg(X[labeled], y[labeled], spec.features, l2=l2)
-    scores = full.predict_proba(X)
 
-    # OOF: 라벨된 점은 층화 k-겹으로 (결정적, 난수 없음 — 등장 순서로 배정)
-    k = max(2, min(n_folds, n_pos, n_neg))
+    # cross-fit 겹 배정 (결정적, 난수 없음): 양성·음성은 층화, 라벨 없음은 등장 순서로
+    k = max(2, min(n_folds, n_pos, len(neg_idx)))
     fold = np.full(len(keys), -1, dtype=int)
     for j, idx in enumerate(pos_idx):
         fold[idx] = j % k
     for j, idx in enumerate(neg_idx):
         fold[idx] = j % k
+    unl = np.where(~labeled)[0]
+    fold[unl] = np.arange(len(unl)) % k
 
+    scores = np.zeros(len(keys), dtype=float)
     oof_scored = 0
+    folds_fallback = 0
     for f in range(k):
-        test = labeled & (fold == f)
+        test = fold == f
         train = labeled & (fold != f)
         ytr = y[train]
         if (ytr == 1).sum() < 1 or (ytr == 0).sum() < 1:
-            continue  # 학습 겹에 한 클래스가 없으면 전체 모델 점수 유지(드묾)
-        m = fit_shrinkage_logreg(X[train], ytr, spec.features, l2=l2)
-        scores[test] = m.predict_proba(X[test])
-        oof_scored += int(test.sum())
+            m = full  # 학습 겹에 한 클래스가 없음(드묾) — 이 겹의 라벨 점은 OOF 아님
+            folds_fallback += 1
+        else:
+            m = fit_shrinkage_logreg(X[train], ytr, spec.features, l2=l2)
+            oof_scored += int((test & labeled).sum())
+        # 겹 안 백분위 — 겹 모델 간 절편·스케일 차이 제거
+        scores[test] = pd.Series(m.predict_proba(X[test])).rank(method="average", pct=True).to_numpy()
 
     return scores, {
         "combiner": "logreg",
-        "n_pos_train": n_pos, "n_neg_train": n_neg,
-        "oof_folds": k, "oof_scored": oof_scored,
+        "scoring": "crossfit_fold_percentile",
+        "n_pos_train": n_pos, "n_neg_train": n_neg, "n_bg_neg_train": n_bg,
+        "oof_folds": k, "oof_scored": oof_scored, "folds_fallback": folds_fallback,
         "coef": full.coef_report(), "intercept": float(full.b),
     }

@@ -93,7 +93,7 @@ def run(args: argparse.Namespace) -> int:
         rr = build_ranking(
             signals, version,
             positives=ls.positives, negatives=ls.negatives,
-            gate=gate,
+            gate=gate, bg_neg_ratio=args.bg_neg_ratio,
         )
         card = score(rr.ranking, ls.positives,
                     universe_size=rr.universe_size, ks=ks)
@@ -128,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="약물 클래스 수준 정답지 행도 포함(기본: 제외, 성분단위 범위)")
     ap.add_argument("--ks", default="100,500,1000,5000", help="평가 K (쉼표)")
     ap.add_argument("--out", default=None, help="결과 JSON 경로")
+    ap.add_argument("--bg-neg-ratio", type=float, default=0.0,
+                    help="v3+ 학습에 배경 음성(라벨 없는 후보)을 양성 수×ratio 개 추가 (기본 0=안 씀)")
     args = ap.parse_args(argv)
     if not args.version:
         args.version = ["v1"]
