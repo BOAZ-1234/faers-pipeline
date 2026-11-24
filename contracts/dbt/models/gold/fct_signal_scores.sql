@@ -18,8 +18,10 @@ with latest_version as (
     from {{ ref('fct_case_drug_reaction') }}
     group by caseid
 ),
+-- OOM 수정(action-plan.md "11/19 추가 요청"): f.* 가 617M행에 drugname·unii 같은
+-- 긴 varchar까지 전부 끌고 와서 16GB 서버에서 터짐 — 아래서 실제로 쓰는 컬럼만 선택.
 latest_rows as (
-    select f.*
+    select f.caseid, f.role_cod, f.ingredient_set, f.pt
     from {{ ref('fct_case_drug_reaction') }} f
     join latest_version lv
       on f.caseid = lv.caseid and f.caseversion = lv.caseversion
